@@ -1,0 +1,319 @@
+---
+title: "Logistic Regression Myotubes"
+output:
+  html_document
+author: Georgii Vdovin
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+pacman::p_load(data.table, ggplot2, dplyr, tibble, emmeans)
+
+set.seed(42)
+```
+
+# Load data
+```{r}
+results_path <- file.path(getwd(), "deblinded_quantified_results")
+list.files(results_path)
+
+
+hypoxia_main <- read.csv(paste0(results_path, "/Hypoxia_Dediff_results_main.csv"))
+hypoxia_rep <- read.csv(paste0(results_path, "/Hypoxia_Dediff_results_repeated.csv"))
+
+
+tgfbeta_dediff <- read.csv(paste0(results_path, "/TGFbeta_Dediff_7d_new_results.csv"))
+tgfbeta_diff <- read.csv(paste0(results_path, "/TGFbeta_Diff_7d_new_results.csv"))
+```
+
+
+
+
+# Figure 5 Hypoxia  
+```{r}
+hypoxia_main <- hypoxia_main %>%
+  mutate(
+     Condition = sub("\\s+$", "", Condition), # Clean spaces
+     n_MT_noEdU = n_MT - n_MT_EdU,                      # Failures for the binomial
+     
+     n_EdU_outside_MT = n_EdU - n_MT_EdU, # For proliferation tests
+     n_Nuclei_outside_MT = n_Nuclei - n_MT,
+     
+     n_noEdu_noMT = n_Nuclei_outside_MT-n_EdU_outside_MT,
+     
+     CCR_arcsine = asin(sqrt(Perc_CCR / 100)) # Arcsine transformation for ANOVA tests of % data
+     ) %>%
+  relocate("Condition", .after = 1)
+```
+
+
+# 5E
+```{r}
+# Logistic regression with EdU+ nuclei as success and EdU- nuclei outside MT as failure
+
+fit_hypo_main_5e <- glm(
+  
+  cbind(n_EdU_outside_MT, n_noEdu_noMT) ~ Condition,   
+  family = binomial,         
+  data   = hypoxia_main
+)
+
+anova_hypo_main_5e <- anova(fit_hypo_main_5e, test = "LRT")
+
+
+emm_5e  <- emmeans(fit_hypo_main_5e, 
+                "Condition", 
+                type = "response")  
+
+# Here Tukey´s test (everything vs everything)
+pairs_5e <- pairs(emm_5e, adjust = "tukey")   
+
+# Results
+anova_hypo_main_5e
+emm_5e 
+pairs_5e
+```
+
+# 5F
+```{r}
+# Logistic regression with EdU-positive MT as success and EdU-negative MT as failure. I include the 0.25% condition for variance estimates, but exclude them for contrasts
+# Each row has to be a sample (well)
+
+fit_hypo_main_5f <- glm(
+  cbind(n_MT_EdU, n_MT_noEdU) ~ Condition,   # response = successes | failures ~ explain success probability with the "Condition" variable
+  
+  family = binomial,          # Binomial likelihood with the logit (default) link
+  data   = hypoxia_main
+)
+
+
+# Overall likelihood-ratio test for any Condition effect (full model with "Condition" vs intercept)
+# Given the observed data, compares log-likelihood of full model vs null model
+
+anova_hypo_main_5f <- anova(fit_hypo_main_5f, test = "LRT")  # Runs ANDEV under the hood, when given a glm
+
+# 110.5 (Deviance) = likelihood ratio statistic
+# p = 2.2e-16 (significant overall difference)
+# p value Calculated with pchisq(110.5, df = 3, lower.tail = FALSE). df = number of groups - 1
+# GLM (overall Condition effect): p = 2.2e-16***
+```
+
+
+```{r}
+# Get the estimated CCR per Condition
+emm_main_5f  <- emmeans(fit_hypo_main_5f, 
+                "Condition", 
+                type = "response")       # "Type" is just how to display results (log scale, or %)
+
+emm_main_5f
+# Gives the % of expected CCR per Condition (prob column), or probability of success. The outputs are a percentage pooled by condition.
+
+# Here Tukey´s test (everything vs everything)
+pairs_main_5f <- pairs(emm_main_5f, adjust = "tukey")
+```
+
+
+```{r}
+# Results
+anova_hypo_main_5f
+emm_main_5f
+pairs_main_5f
+```
+
+
+# 5G
+```{r}
+hypoxia_rep <- hypoxia_rep %>%
+  mutate(
+     Condition = sub("\\s+$", "", Condition), # Clean spaces
+     n_MT_noEdU = n_MT - n_MT_EdU,                      # Failures for the binomial
+     
+     n_EdU_outside_MT = n_EdU - n_MT_EdU, # For proliferation tests
+     n_Nuclei_outside_MT = n_Nuclei - n_MT,
+     
+     n_noEdu_noMT = n_Nuclei_outside_MT-n_EdU_outside_MT,
+     
+     CCR_arcsine = asin(sqrt(Perc_CCR / 100)) # Arcsine transformation for ANOVA tests of % data
+     ) %>%
+  relocate("Condition", .after = 1)
+```
+
+
+```{r}
+# Logistic regression with EdU-positive MT as success and EdU-negative MT as failure
+# Fit the logistic model (binomial likelihood per well)
+
+fit_hypo_rep_5g <- glm(
+  
+  cbind(n_MT_EdU, n_MT_noEdU) ~ Condition,   
+  
+  family = binomial,        
+  data   = hypoxia_rep
+)
+
+anova_hypo_rep_5g <- anova(fit_hypo_rep_5g, test = "LRT") 
+anova_hypo_rep_5g
+```
+
+
+```{r}
+emm_5g  <- emmeans(fit_hypo_rep_5g, 
+                "Condition", 
+                type = "response")       
+emm_5g
+
+```
+
+```{r}
+# Here Tukey´s test (everything vs everything)
+pairs_5g <- pairs(emm_5g, adjust = "tukey")   
+pairs_5g
+```
+
+
+```{r}
+# Results
+anova_hypo_rep_5g
+emm_5g
+pairs_5g
+```
+
+
+
+# Figure 4H TGFbeta Dedifferentiation 
+```{r}
+tgfbeta_dediff <- tgfbeta_dediff %>%
+  mutate(
+     Condition = factor(sub("^[^ ]+ ", "", OriginalID)),
+     Condition = sub("\\s+$", "", Condition), # Clean spaces
+     n_MT_noEdU = n_MT - n_MT_EdU,                      # Failures for the binomial
+     CCR_arcsine = asin(sqrt(Perc_CCR / 100)) # Arcsine transformation for ANOVA tests of % data
+     ) %>%
+  
+  relocate("Condition", .after = 1)
+```
+
+
+```{r}
+# Logistic regression with EdU-positive MT as success and EdU-negative MT as failure
+
+fit_tgfbeta_dediff <- glm(
+  cbind(n_MT_EdU, n_MT_noEdU) ~ Condition,   
+  
+  family = binomial,         
+  data   = tgfbeta_dediff
+)
+
+anova_tgfbeta_dediff <- anova(fit_tgfbeta_dediff, test = "LRT") 
+
+
+# Get the estimated CCR per Condition & Dunnett's pair–wise p-values
+emm_tgfbeta_dediff  <- emmeans(fit_tgfbeta_dediff, "Condition", type = "response")       
+
+
+# Restrict contrasts, excluding 0.25%FCS group. It is still used for variance estimates, but not for contrasts. Here comparing everything to everything, thus Tukey´s post hoc
+
+
+pairs_tgfbeta_dediff <- pairs(emm_tgfbeta_dediff, 
+                              exclude = c("0.25%FCS"),
+                              adjust = "tukey")
+```
+
+```{r}
+# Results 
+
+anova_tgfbeta_dediff
+emm_tgfbeta_dediff
+pairs_tgfbeta_dediff
+```
+
+
+# Figure 4 TGFbeta Differentiation 
+```{r}
+tgfbeta_diff <- tgfbeta_diff %>%
+  mutate(
+     Condition = factor(sub("^[^ ]+ ", "", OriginalID)),
+     Condition = sub("\\s+$", "", Condition), # Clean spaces
+     
+     n_Nuclei_no_MT = n_Nuclei - n_MT,                      # For Diff index 
+     
+     n_EdU_outside_MT = n_EdU - n_MT_EdU, # For proliferation tests
+     n_Nuclei_outside_MT = n_Nuclei - n_MT,
+     
+     n_noEdu_noMT = n_Nuclei_outside_MT-n_EdU_outside_MT,
+     
+     Diff_arcsine = asin(sqrt(Diff.Index / 100)) # Arcsine transformation for ANOVA tests of % data
+     ) %>%
+  
+  relocate("Condition", .after = 1)
+```
+
+# 4I
+```{r}
+# Logistic regression with MT nuclei as success and nuclei outside MT as failure
+
+fit_tgfbeta_diff <- glm(
+  cbind(n_MT, n_Nuclei_no_MT) ~ Condition,
+  family = binomial,         
+  data   = tgfbeta_diff
+)
+
+
+anova_tgfbeta_diff <- anova(fit_tgfbeta_diff, test = "LRT") 
+
+# Get the estimated Diff.index per Condition & Dunnett's pair–wise p-values
+emm_tgfbeta_diff  <- emmeans(fit_tgfbeta_diff, "Condition", 
+                             type = "response")       
+
+
+# Restrict contrasts, excluding 0.25%FCS group
+pairs_tgfbeta_diff <- pairs(emm_tgfbeta_diff, 
+                              exclude = c("0.25%FCS"),
+                              adjust = "tukey")
+```
+
+
+```{r}
+# Results
+anova_tgfbeta_diff
+emm_tgfbeta_diff
+pairs_tgfbeta_diff
+```
+
+
+
+# 4J
+```{r}
+# Logistic regression with EdU+ nuclei as success and EdU- nuclei outside MT as failure
+
+fit_tgfbeta_diff_pro <- glm(
+  cbind(n_EdU_outside_MT, n_noEdu_noMT) ~ Condition,   
+  family = binomial,         
+  data   = tgfbeta_diff
+)
+
+anova_tgfbeta_diff_pro <- anova(fit_tgfbeta_diff_pro, test = "LRT")
+emm_tgfbeta_diff_pro  <- emmeans(fit_tgfbeta_diff_pro, "Condition", type = "response")      
+
+
+# Restrict contrasts, excluding 0.25%FCS group
+pairs_tgfbeta_diff_pro <- pairs(emm_tgfbeta_diff_pro, 
+                              exclude = c("0.25%FCS"),
+                              adjust = "tukey")
+```
+
+```{r}
+# Results
+anova_tgfbeta_diff_pro
+emm_tgfbeta_diff_pro
+pairs_tgfbeta_diff_pro
+```
+
+
+# End
+```{r}
+sessionInfo()
+```
+

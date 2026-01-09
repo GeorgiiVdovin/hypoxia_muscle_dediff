@@ -1,0 +1,97 @@
+---
+title: "N. viridescens Annotation"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(tidyverse, BiocManager, readr, readxl, UniProt.ws, seqinr, data.frame, data.table)
+
+
+
+# Takes isoforms with consecutive numbers (e.g. gene47, gene48, gene49, gene50 and gene51) and the same homology hit (e.g. XYNB_NEOPA) and gave them the same gene name (e.g. XYNB.1)
+```
+
+
+#tx2gene Mapping
+```{r}
+annotations_og <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir Annotation SYMBOLS + org.Nvir/Nvir Latest Annotation Katia/Nvir_annotations_tx_level.csv")
+```
+
+
+```{r}
+annotations <- annotations_og %>%
+  dplyr::select(txid, stitle_SP, Description_IP) %>%
+  mutate(Description_IP = na_if(Description_IP, "---NA---"))  %>%
+  mutate(Description_IP = na_if(Description_IP, "")) %>%  # Convert empty strings to NA, otherwise groups together
+  mutate(Description_IP = tolower(Description_IP))  # Convert to lowercase
+
+
+annotations <- annotations  %>%
+  separate(txid, into = c("prefix", "number"), sep = "_", convert = TRUE) %>% # Separate id's for sorting
+  arrange(prefix, number) %>%
+  mutate(txid = paste(prefix, number, sep = "_")) %>%
+  
+  dplyr::rename(uniprot = stitle_SP) %>%
+  dplyr::rename(TXNAME = txid)
+```
+
+
+```{r}
+# Makes a grouping column for isoforms based on consecutive appearance of either Uniprot or Description_IP mapping in a row. Prioritizes whichever has the longer group size (e.g. if Description_IP is x x y x but Uniprot is z z z z, Uniprot will be preferred)
+
+create_isoform <- function(df) {
+  
+  df <- df %>%
+    mutate(
+      description_run = with(rle(Description_IP), rep(lengths, lengths)),
+      uniprot_run = with(rle(uniprot), rep(lengths, lengths))
+    ) %>%
+    
+    rowwise() %>%
+    mutate(isoform = ifelse(description_run >= uniprot_run, Description_IP, uniprot)) %>%
+    ungroup() %>%
+    dplyr::select(-description_run, -uniprot_run)
+  return(df)
+}
+
+# Apply the function
+annotations <- create_isoform(annotations) %>%
+    mutate(isoform = ifelse(is.na(isoform), TXNAME, isoform))
+```
+
+
+
+```{r}
+# Create the final mapping
+
+tx2gene <- annotations %>%
+  
+  mutate(GENEID = paste0("g.", cumsum(isoform != lag(isoform, default = dplyr::first(isoform))) + 1)) %>%
+  
+  dplyr::select(TXNAME, GENEID)
+
+# Adds g. prefix for "genes" and +1 to start count at one and not zero
+
+
+
+
+tx2gene %>% summarise(unique_count = n_distinct(GENEID))
+```
+
+
+
+```{r}
+write.csv(tx2gene, file = "tx2gene_nvir_katia.csv", row.names = FALSE)
+```
+
+
+```{r}
+sessionInfo()
+```
+

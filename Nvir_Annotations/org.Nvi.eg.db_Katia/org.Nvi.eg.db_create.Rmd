@@ -1,0 +1,139 @@
+---
+title: "N. viridescens Annotation Package"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(tidyverse, BiocManager, readr, readxl, AnnotationForge, AnnotationDbi)
+```
+
+```{r}
+# Read the gzipped text file
+annotations_nvir <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+head(annotations_nvir)
+
+
+annotations_nvir <- annotations_nvir %>%
+  dplyr::rename(GO = GO.IDs_IP)
+
+
+annotations_nvir$X.GO_IP[is.na(annotations_nvir$X.GO_IP)] <- 0
+
+# Group by GENEID and filter the rows where X.GO_IP is the largest 
+
+annotations_nvir <- annotations_nvir %>%
+  mutate(row_number = row_number()) %>%
+  group_by(GENEID) %>%
+  filter(X.GO_IP == max(X.GO_IP)) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  arrange(row_number) %>% 
+  dplyr::select(-row_number) 
+
+rownames(annotations_nvir) <- annotations_nvir$GENEID
+```
+
+
+```{r}
+# Now prepare some data.frames
+NvirSym <- annotations_nvir[,c(1,3,4,5)]
+
+colnames(NvirSym) <- c("GID", "SYMBOL", "DESCRIPTION_SP", "DESCRIPTION_IP") 
+
+NvirSym <- NvirSym %>%
+  mutate(DESCRIPTION_SP = ifelse(is.na(DESCRIPTION_SP), "-", DESCRIPTION_SP)) %>%
+  mutate(DESCRIPTION_IP = gsub("---NA---", "-", DESCRIPTION_IP))
+```
+
+
+```{r}
+# Add Uniprot ID's
+
+NvirUniprot <- annotations_nvir[,c(1,16)] 
+colnames(NvirUniprot) <- c("GID","UNIPROT")
+
+NvirUniprot <- NvirUniprot %>%
+  filter(!is.na(UNIPROT)) 
+```
+
+
+```{r}
+# GO Annotation. Don't need to separate by GO type, is determined automatically by other packages
+
+NvirGO <- annotations_nvir %>%
+  separate_rows(GO, sep = "; ") %>%
+  mutate(GO = gsub("^[CPF]:", "", GO),
+         EVIDENCE = "IEA") %>%  
+  filter(!is.na(GO)) %>% # Remove the rows with NA values in the GO column
+  dplyr::select(GID = GENEID, GO, EVIDENCE) # Select only the GID and GO columns
+
+print(NvirGO)
+```
+
+
+
+```{r}
+# Remove redundant multi-mappings (completely identical rows)
+
+NvirSym <- NvirSym[!duplicated(NvirSym), ]
+NvirUniprot <- NvirUniprot[!duplicated(NvirUniprot), ]
+NvirGO <- NvirGO[!duplicated(NvirGO), ]
+```
+
+
+
+```{r}
+# Then call the package function
+
+makeOrgPackage(gene_info = NvirSym, 
+               UNIPROT = NvirUniprot, 
+               go = NvirGO,
+               version = "0.1",
+               maintainer = "Georgii Vdovin <georgii.vdovin@tu-dresden.de>",
+               author = "Georgii Vdovin",
+               outputDir = ".",
+               tax_id = "8316",
+               genus = "Notophthalmus",
+               species = "viridescens",
+               goTable = "go")
+```
+
+
+```{r}
+# Call install.packages based on the return value
+install.packages("./org.Nviridescens.eg.db", 
+                 type = "source",
+                 repos = NULL)
+
+library(AnnotationDbi)
+
+library(org.Nviridescens.eg.db)
+```
+
+
+```{r eval = FALSE}
+# Check for duplicates column
+duplicated_rows <- NvirUniprot[duplicated(NvirUniprot) | duplicated(NvirUniprot, fromLast = TRUE), ]
+
+# Extract duplicated rows
+duplicated_rows <- annotations_nvir[duplicated_rows, ]
+
+if (nrow(duplicated_rows) > 0) {
+  print(duplicated_rows)
+  stop("Duplicate rows found.")
+}
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

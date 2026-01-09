@@ -1,0 +1,318 @@
+---
+title: "N. viridescens Annotation"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(tidyverse, BiocManager, readr, readxl, UniProt.ws, seqinr, conflicted, data.frame, data.table)
+
+mapply(conflict_prefer, c("rename", "select", "filter", "slice"), "dplyr")
+```
+
+
+#SWISSPROT BLASTP Katia
+```{r}
+# Blast hits obtained by blastp against swissprot with Galaxy.eu
+library(data.table)
+
+blastp_og_katia <- fread("blastp_Nvir_protein_vs_swissprot_Katia_TransDecoder.tabular")
+
+colnames(blastp_og_katia) <- c("query", "hit", "pident", "evalue", "aling_length", "bitscore", "sacc", "stitle")
+
+
+
+# Taking the top 1 hits with evalue cutoff 1e-10. Cutoff as in Brown et al Pleurodeles genome paper
+
+blastp_katia <- blastp_og_katia %>%
+  filter(evalue <= 1e-5) %>%
+  group_by(query) %>%
+  slice(1) %>%
+  ungroup() %>% 
+  mutate(txid = str_extract(query, "(?<=::)\\d+_\\d+(?=::)"))
+```
+
+
+```{r}
+# Fetching gene names per Uniprot BLAST hit 
+
+uniprot_chunk <- function(query_list, chunk_size = 1000) {
+  result <- data.frame()
+  
+  # Split the query list into chunks
+  query_chunks <- split(query_list, ceiling(seq_along(query_list)/chunk_size))
+  
+  for (chunk in query_chunks) {
+    # Perform the API request for each chunk
+    chunk_result <- mapUniProt(
+      from = "UniProtKB_AC-ID",
+      to = "Gene_Name",
+      query = chunk
+    ) %>% as.data.frame()
+    
+    # Combine the results
+    result <- bind_rows(result, chunk_result)
+  }
+  
+  return(result)
+}
+
+# Getting gene SYMBOLS in chunks 
+uniprot_ids_blastp_katia <- uniprot_chunk(blastp_katia$stitle, chunk_size = 1000)
+
+# Print the result
+print(uniprot_ids_blastp_katia)
+```
+
+
+
+```{r}
+# Join gene SYMBOLS with blastp results
+
+blastp_katia <- blastp_katia %>%
+  left_join(uniprot_ids_blastp_katia, by = c("stitle" = "From")) %>%
+  relocate(txid, .after = query) %>%
+  rename(Uniprot = To) %>%
+  distinct(txid, .keep_all = TRUE) %>% # Some UNIPROT ID's have multi-mapping, keep first match only
+  select(-query) %>%
+  rename(Description = sacc) 
+
+colnames(blastp_katia) <- ifelse(colnames(blastp_katia) == "txid", "txid", paste0(colnames(blastp_katia), "_SP"))
+```
+
+
+```{r}
+# Fetching protein names for Uniprot entries that lack a gene name
+
+na_genes <- blastp_katia[!is.na(blastp_katia$stitle_SP) & is.na(blastp_katia$Uniprot_SP), ]
+
+
+uniprot_protein_chunk <- function(query_list, chunk_size = 1000) {
+  result <- data.frame()
+  
+  # Split the query list into chunks
+  query_chunks <- split(query_list, ceiling(seq_along(query_list)/chunk_size))
+  
+  for (chunk in query_chunks) {
+    # Perform the API request for each chunk
+    chunk_result <- mapUniProt(
+      from = "UniProtKB_AC-ID",
+      to = "UniProtKB-Swiss-Prot",
+      query = chunk
+    ) %>% as.data.frame()
+    
+    # Combine the results
+    result <- bind_rows(result, chunk_result)
+  }
+  
+  return(result)
+}
+
+
+
+# Getting protein SYMBOLS in chunks 
+protein_names_na <- uniprot_protein_chunk(na_genes$stitle_SP, chunk_size = 1000) 
+
+protein_names_na$Entry.Name <- sub("_.*", "", protein_names_na$Entry.Name) # Remove the species suffix
+
+protein_names <- protein_names_na %>% # Keep only the 2 key columns
+  rename(Uniprot_SP = Entry.Name,
+         stitle_SP = Entry) %>% # Common column with original df
+  select(Uniprot_SP, stitle_SP)
+
+# Print the result
+print(protein_names)
+```
+
+```{r}
+# Join the dataframes by stitle_SP and update the original blastp_katia df
+
+blastp_katia <- blastp_katia %>%
+  left_join(protein_names, by = "stitle_SP") %>%
+  mutate(Uniprot_SP = ifelse(is.na(Uniprot_SP.x), Uniprot_SP.y, Uniprot_SP.x)) %>%
+  distinct(txid, .keep_all = TRUE) %>% # Some UNIPROT ID's have multi-mapping, keep first match only
+  select(-Uniprot_SP.y, -Uniprot_SP.x)  # Remove merge columns
+```
+
+
+#INTERPRO
+```{r}
+# Interpro annotations acquired from Katia Del Rio-Tsonis lab
+
+library(data.table)
+
+interpro_katia <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Katia_Reference/NVir_Transcriptome_Annotation.txt")
+
+interpro_katia <- interpro_katia %>%
+  rename(txid = SeqName) %>%
+  select(txid, Description, '#GO', 'GO IDs', 'GO Names', 'Enzyme Codes', 'InterPro IDs')
+
+colnames(interpro_katia) <- ifelse(colnames(interpro_katia) == "txid", "txid", paste0(colnames(interpro_katia), "_IP"))
+```
+
+
+```{r}
+# Merging all annotations together
+
+annotations_tx <- merge(interpro_katia, blastp_katia, by = "txid", all = TRUE) 
+
+annotations_tx$`GO IDs_IP`[annotations_tx$`GO IDs_IP` == ""] <- NA
+
+
+annotations_tx <- annotations_tx %>%
+    mutate(annotation_status = !is.na(`GO IDs_IP`)) %>% # MUST be here, checks if a gene can be used for GO analysis
+    mutate(SYMBOL = Uniprot_SP) %>%
+    mutate(SYMBOL = if_else(is.na(SYMBOL), Uniprot_SP, SYMBOL)) %>%
+    relocate(Description_SP, .after = txid)
+
+annotations_tx$Description_SP <- gsub("RecName: Full=", "", annotations_tx$Description_SP)
+```
+
+
+
+#MANUAL ANNOTATION
+```{r}
+# Manually annotating mitochondrial genes for SC QC
+
+annotations_tx <- annotations_tx %>%
+  mutate(SYMBOL = ifelse(txid == "3_22504621", "MT-cyoB", SYMBOL),
+         Uniprot_SP = ifelse(txid == "3_22504621", "MT-cyoB", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_4135882", "MT-Nd1", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_4135882", "MT-Nd1", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "7_60459045", "MT-Cox1", SYMBOL),
+         Uniprot_SP = ifelse(txid == "7_60459045", "MT-Cox1", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "8_67573118", "MT-Cox2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "8_67573118", "MT-Cox2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_6808946", "MT-Cytb", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_6808946", "MT-Cytb", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_6858656", "MT-Nd2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_6858656", "MT-Nd2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_8473345", "MT-cyoB", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_8473345", "MT-cyoB", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_4339099", "MT-TH", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_4339099", "MT-TH", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "3_17707410", "MT-Nd5", SYMBOL),
+         Uniprot_SP = ifelse(txid == "3_17707410", "MT-Nd5", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "3_18179561", "MT-RNR1", SYMBOL),
+         Uniprot_SP = ifelse(txid == "3_18179561", "MT-RNR1", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "2_12298944", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "2_12298944", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "1_2281124", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "1_2281124", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "6_43240293", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "6_43240293", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "6_43240290", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "6_43240290", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "8_63735163", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "8_63735163", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "8_67074211", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "8_67074211", "MT-RNR2", Uniprot_SP)) %>%
+  
+  mutate(SYMBOL = ifelse(txid == "6_49991737", "MT-RNR2", SYMBOL),
+         Uniprot_SP = ifelse(txid == "6_49991737", "MT-RNR2", Uniprot_SP))
+```
+
+```{r}
+write.csv(annotations_tx, file = "Nvir_annotations_tx_level.csv", row.names = FALSE)
+```
+
+
+#tx2gene
+```{r}
+tx2gene <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/tx2gene_katia/tx2gene_nvir_katia.csv")
+```
+
+```{r}
+annotations_tx <- annotations_tx %>%
+  left_join(tx2gene, by = c("txid" = "TXNAME"))  %>%
+  relocate(GENEID, .before = txid) %>%
+  arrange(match(txid, tx2gene$TXNAME)) # Preserve the numerical gene order
+
+# Assigning the same SYMBOL to the same geneid's. Prevents different naming of isoforms
+annotations_tx <- annotations_tx %>%
+  group_by(GENEID) %>%
+  mutate(SYMBOL = ifelse(any(!is.na(evalue_SP)), SYMBOL[which.min(evalue_SP)], SYMBOL[1])) %>%  # In case of ambiguity (e.g. upper/lowercase) take the lowest evalue symbol
+  ungroup() 
+```
+
+
+#SYMBOLS
+```{r}
+# Symbols need to be grouped by gene id's
+symbols <- annotations_tx %>%
+  dplyr::select(SYMBOL, GENEID) %>%
+  distinct(GENEID, .keep_all = TRUE) 
+```
+
+
+```{r}
+# Make duplicated SYMBOLS unique:
+
+uniquify <- function(vec) {
+  
+  # Create a table of occurrences for each value
+  tab <- table(vec)
+  # Vector to store the results
+  result <- vec
+
+  # Loop through each unique value
+  for (val in names(tab)) {
+    # Find indices of this value in the original vector
+    indices <- which(vec == val)
+    # If there are duplicates, append suffixes to them
+    if (tab[val] > 1) {
+      suffixes <- paste0(".", seq_along(indices) - 1)
+      suffixes[1] <- ""  # First occurrence should not have a suffix
+      result[indices] <- paste0(val, suffixes)
+    }
+  }
+
+  return(result)
+}
+
+symbols$SYMBOL <- uniquify(symbols$SYMBOL)
+```
+
+
+
+```{r}
+# Merge symbols with the main df
+
+annotations_final <- annotations_tx %>%
+  dplyr::select(-SYMBOL) %>%
+  left_join(symbols, by = "GENEID") %>%
+  relocate(SYMBOL, .after = txid) %>%
+  mutate(SYMBOL = if_else(is.na(SYMBOL), GENEID, SYMBOL)) 
+```
+
+
+
+```{r}
+write.csv(annotations_final, file = "Nvir_annotations_MT_Katia_final.csv", row.names = FALSE)
+```
+
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,254 @@
+---
+title: "Top GEX kallisto MT"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(dplyr, data.table, ggplot2, tidyverse, BiocManager, readr, tximport, ggrepel)
+
+library(org.Nviridescens.eg.db)
+```
+
+
+###############
+#PREPARING DATA
+###############
+
+```{r}
+# Load in annotations
+annotations_combined <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Combined Annotations Nvir/Nvir_annotations_combined.csv", header = TRUE)
+
+# Katia annotations
+annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+head(annotations)
+```
+
+
+
+```{r}
+# Read in kallisto abundance files
+
+dir <- "C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1/kallisto_quant_MT_katia"
+
+list.files(dir)
+```
+
+
+
+```{r}
+# Read in only the control proliferating samples
+
+files <- file.path(dir, c("Ctrl_0h_1_ Abundances (tabular).tabular", 
+                          "Ctrl_0h_2_ Abundances (tabular).tabular", 
+                          "Ctrl_0h_3_ Abundances (tabular).tabular"))
+all(file.exists(files))
+
+names(files) <- c("Ctrl_0h_1", "Ctrl_0h_2", "Ctrl_0h_3")
+
+files
+```
+
+
+
+```{r}
+tx2gene <- read.csv(file.path(dir, "tx2gene_nvir_katia.csv"))
+
+txi.kallisto <- tximport(files, 
+                         type = "kallisto",
+                         tx2gene = tx2gene) 
+
+abundance <- txi.kallisto$abundance # Extract TPM
+
+```
+
+
+###########
+#Median GEX
+###########
+```{r}
+# Calculate median TPM values for every gene across replicates => more resistant to outliers
+
+median_tpm <-  rowMedians(abundance) 
+
+median_tpm <- data.frame(median_tpm, 
+                         GENEID = rownames(abundance))
+```
+
+
+```{r}
+# Sort genes by median TPM value
+
+median_tpm <- median_tpm %>%
+  left_join(annotations, by = "GENEID") %>%
+  arrange(desc(median_tpm)) %>%
+  mutate(percentile = ntile(median_tpm, 100)) # Calculate the expression percentiles for every gene
+    
+
+median_tpm$median_tpm <- round(median_tpm$median_tpm, 2)
+
+
+
+median_tpm <- median_tpm %>% mutate(logmedian = log2(median_tpm + 1))  # Log-transform 
+
+median_tpm$logmedian <- round(median_tpm$logmedian, 2)
+```
+
+
+
+```{r}
+# Missing myogenesis genes from the Sandberg annotation
+
+sandberg_myogenesis <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1_Sandberg/Myogenesis_genes_Sandberg.csv", header = TRUE) %>%
+  dplyr::select(target_id, SYMBOL, median_tpm, percentile, logmedian) %>%
+  rename(target_id = "GENEID")
+```
+
+
+
+```{r}
+# Isolate relevant columns and merge with missing genes 
+
+marker_tpm_all <- median_tpm %>%
+  mutate(median_tpm = round(median_tpm)) %>%
+  dplyr::select(GENEID, SYMBOL, median_tpm, percentile, logmedian) %>%
+  distinct(SYMBOL, .keep_all = TRUE)
+  
+
+marker_tpm_all <- rbind(marker_tpm_all, sandberg_myogenesis)
+```
+
+
+
+
+```{r}
+# Add cell type marker labels for each gene
+
+marker_tpm <- marker_tpm_all %>%
+  dplyr::filter(SYMBOL %in% 
+                  
+                  c("TAGLN", "ACTA2", "Cald1", "des", "Aebp1.3", "MYOCD", "MYH11.2", "MYH9.3", "Myh9.4", "CCN1", "PALLD", "MYL9.1", "CNN1", "TPM2", "tpm1.3", "Tagln2.3", "Mcam", "TINAGL1", "FLNA.4", "Myog", "Myf6",
+                    
+                    "Col5a2.2", "Loxl1", "Pdgfra", "FBLN1.1", "LUM.1", "DPT", "HSD11B1.1", "CD34", "FBLN1.2", "Fbln2",
+                    
+                    
+                    "COL1A2", "COL1A1.2", "TIMP2", "Col12a1.2", "COL6A2.4", "VIM.1", "fn1", "COL5A1.2", "RGS4", "MGST3", "CCN2",
+                    
+                    "pax3", "Pax7", "Myf5"
+                    
+                    
+                    )) %>% # Rename genes
+  
+  
+  dplyr::mutate(SYMBOL = str_to_sentence(SYMBOL)) %>%
+  
+  
+  
+  dplyr::mutate(cell_type = dplyr::case_when(
+    SYMBOL %in% c("Tagln", "Acta2", "Cald1", "Des", "Aebp1.3", "Myocd", "Myh11.2", "Myh9.3", "Myh9.4", "Ccn1", "Palld", "Myl9.1", "Cnn1", "Tpm2", "Tpm1.3", "Tagln2.3", "Mcam", "Tinagl1", "Flna.4", "Myog", "Myf6") ~ "Smooth Muscle",
+    
+    SYMBOL %in% c("Col5a2.2", "Loxl1", "Pdgfra", "Fbln1.1", "Lum.1", "Dpt", "Hsd11b1.1", "Cd34", "Fbln1.2", "Fbln2") ~ "Fibroblast",
+    
+    SYMBOL %in% c("Col1a2", "Col1a1.2", "Timp2", "Col12a1.2", "Col6a2.4", "Vim.1", "Fn1", "Col5a1.2", "Rgs4", "Mgst3", "Ccn2") ~ "Mixed",
+    
+    SYMBOL %in% c( "Pax3", "Pax7", "Myf5") ~ "Myoblast"
+
+    
+    
+  )) 
+```
+
+
+
+```{r}
+# Set the order of cell_type
+marker_tpm$cell_type <- factor(marker_tpm$cell_type, 
+                               levels = c("Smooth Muscle", "Fibroblast", "Mixed", "Myoblast"))
+
+marker_tpm <- marker_tpm %>%
+  arrange(cell_type, desc(median_tpm)) %>%
+  mutate(SYMBOL = factor(SYMBOL, levels = unique(SYMBOL)))
+
+# Define colors)
+color_palette <- c("Smooth Muscle" = "#F8766D", 
+                   "Fibroblast" = "#00BFC4", 
+                   "Mixed" = "#7CAE00", 
+                   "Myoblast" = "#C77CFF")
+```
+
+```{r}
+
+ggplot(marker_tpm, aes(x = SYMBOL, y = median_tpm, fill = cell_type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = SYMBOL, vjust = -0.2, hjust = -0.1, angle = 40, size = 3), show.legend = FALSE) +
+  geom_hline(yintercept = 10, linetype = "dashed", color = "black") +
+  geom_hline(yintercept = 1000, linetype = "dashed", color = "black") +
+  
+  annotate("text", x = Inf, y = 3.32, label = "Expression thr", vjust = 1, hjust = 1.1, color = "red", size = 3.5) + # Add label to the dashed line
+  scale_fill_manual(values = color_palette) +  # Apply the color palette
+  theme_minimal() +
+  labs(title = "Median TPM Across 3 Bulk A1 Samples",
+       x = "Gene Symbol",
+       y = "Median TPM") +
+  #scale_fill_manual(values = c("Smooth Muscle" = "blue", "Fibroblast" = "red", "Myoblast" = "green")) +
+  ylim(0, NA) +
+  theme(legend.title = element_blank(),
+        axis.text.x = element_blank(), # Remove x-axis labels
+        axis.ticks.x = element_blank()) 
+```
+
+
+```{r}
+# Log2 scale
+
+ggplot(marker_tpm, aes(x = SYMBOL, y = logmedian, fill = cell_type)) +
+  geom_bar(stat = "identity", show.legend = FALSE) + 
+  
+    geom_text_repel(aes(label = SYMBOL), 
+                  size = 5, 
+                  vjust = -0.2,  
+                  hjust = 0.0,   
+                  angle = 40,    
+                  box.padding = 0.3,  # Adjust padding between labels
+                  point.padding = 0.2,  # Adjust padding between points and labels
+                  segment.size = 0,  # Remove the lines between label and bar
+                  show.legend = FALSE) + 
+  
+  geom_hline(yintercept = 3.32, linetype = "dashed", color = "black") + # 10 TPM
+  geom_hline(yintercept = 9.97, linetype = "dashed", color = "black") + # 1000 TPM
+  
+  annotate("text", x = Inf, y = 9.97, label = "1000 TPM", vjust = -0.5, hjust = 1.1, color = "red", size = 3.5) + # Add label to the dashed line
+  
+  annotate("text", x = Inf, y = 3.32, label = "10 TPM", vjust = -0.5, hjust = -0.5, color = "red", size = 3.5) + # Add label to the dashed line
+  
+  scale_fill_manual(values = color_palette) +  # Apply the color palette
+  
+  theme_minimal() +
+  labs(title = "Log2 Median TPM Across 3 Bulk A1 Samples",
+       x = "Gene Symbol",
+       y = "Log2 Median TPM") +
+  ylim(0, NA) +
+  coord_cartesian(clip = "off") +  # Allow plotting outside the panel
+    theme(legend.title = element_blank(),
+        axis.text.x = element_blank(),  # Remove x-axis labels
+        axis.ticks.x = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5),  # Increase title size
+        axis.title.x = element_text(size = 16),  # Increase x-axis label size
+        axis.title.y = element_text(size = 16))  # Increase y-axis label size
+
+ggsave(filename = "Log2 Median TPM A1 Samples.png", width = 10, height = 12, dpi = 1200)
+```
+
+####
+#END
+####
+```{r}
+sessionInfo()
+```
+

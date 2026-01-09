@@ -1,0 +1,1425 @@
+---
+title: "Pairwise Gene-Level Nvir Myotube Diff/Dediff Analysis"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(data.table, ggplot2, tidyverse, BiocManager, readr, DESeq2, pheatmap, RColorBrewer, gridExtra, clusterProfiler, enrichplot, gridExtra, tximport, EnhancedVolcano, apeglm, DOSE, org.Nviridescens.eg.db)
+```
+
+
+```{r eval = FALSE}
+# If launching for the first time -> install the annotation package
+
+install.packages("Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nviridescens.eg.db", 
+                 type = "source",
+                 repos = NULL)
+```
+
+
+#Preparing Data
+```{r}
+# Load in annotations
+annotations_combined <- fread("/Combined_Annotations_Nvir/Nvir_annotations_combined.csv", header = TRUE)
+
+
+
+# Katia Del-Rio Tsonis Lab transcriptome annotations
+annotations <- read.csv("/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+head(annotations)
+```
+
+
+```{r}
+# Read in salmon abundance files
+
+dir <- "/salmon_MT_Katia_reference"
+
+#list.files(dir)
+```
+
+
+```{r}
+coldata <- read.table(file.path(dir, "samples.txt"), header = TRUE)
+
+coldata <- coldata %>%
+  mutate(timepoint = relevel(factor(timepoint), ref = "120"), # Dediff as the interesting one
+         differentiation = factor(differentiation))
+         
+rownames(coldata) <- coldata$replicate
+```
+
+
+
+
+```{r}
+files <- file.path(dir, coldata$filename) # List of all of your files
+all(file.exists(files))
+
+names(files) <- coldata$replicate # Name files based on metadata
+```
+
+```{r}
+tx2gene <- read.csv(file.path(dir, "tx2gene_nvir_katia.csv"))
+```
+
+
+```{r}
+txi <- tximport(files, 
+                type = "salmon", 
+                tx2gene = tx2gene) 
+
+counts <- txi$abundance
+
+# QC
+all(rownames(coldata) == colnames(txi))
+```
+
+
+#Differential Expression Analysis
+```{r}
+# Create DESEq2 object
+
+dds <- DESeqDataSetFromTximport(txi,
+                                   colData = coldata,
+                                   design = ~ timepoint)
+
+# Pre-filter -> at least 10 counts in 3 samples. N = minimal number of samples where non-zero counts would be considered interesting
+
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep,]
+
+
+dds <- DESeq(dds) 
+
+resultsNames(dds)
+
+res <- lfcShrink(dds, coef = "timepoint_128_vs_120", type = "apeglm") # Shrink inflated LFC for genes with low expression
+
+dds$timepoint <- factor(dds$timepoint, levels = c(0, 8, 72, 120, 128, 144, 168)) # Re-level factors back for plots
+```
+
+
+
+```{r}
+# Takes the annotation of isoforms with the most GO annotations
+annotations_gid <- annotations
+
+annotations_gid$X.GO_IP[is.na(annotations_gid$X.GO_IP)] <- 0
+
+# Group by GENEID and filter the rows where X.GO_IP is the largest 
+
+setDT(annotations_gid)
+
+# Dplyr takes too long, this is more efficient
+annotations_gid <- annotations_gid[, .SD[which.max(X.GO_IP)], by = GENEID]
+```
+
+
+```{r}
+# Results with most significant genes on top  
+
+res_df <- as.data.frame(res) %>%
+  rownames_to_column(var = "GENEID") %>%
+  left_join(annotations_gid, by = "GENEID") %>%
+  relocate(SYMBOL, .before = 1) %>%
+  arrange(padj) 
+
+vsd <- vst(dds, blind = FALSE)
+
+plotPCA(vsd, intgroup = c("timepoint", "differentiation"), returnData = FALSE)
+```
+
+
+
+```{r}
+# Only GO annotated results for GO ORA, removing probable unmerged isoforms to avoid redundancy for volcano and heatmaps
+
+res_anno <- res_df %>%
+  filter(annotation_status == "TRUE") %>%
+  mutate(SYMBOL = replace(SYMBOL, SYMBOL == "HIF3A.1", "HIF3A")) %>%
+  arrange(padj)
+
+head(res_anno)
+
+
+
+
+
+# Keep the most significant hit for likely unmerged isoforms, to avoid redundancy for top50 heatmaps 
+
+res_anno_single <- res_anno %>%
+  group_by(Uniprot_SP) %>%  # Group by Swissprot names
+  slice_min(order_by = padj, n = 1) %>%  # Keep the most significant hit
+  ungroup() %>%
+  arrange(padj)
+
+
+
+
+
+# Only genes that have a SYMBOL for heatmaps
+res_symbol <- res_df[!grepl("^g\\.", res_df$SYMBOL), ]
+
+counts <- counts(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "GENEID") %>%
+  left_join(annotations_gid, by = "GENEID")
+```
+
+
+```{r}
+# Number of significant genes by padj cutoff.
+
+length(which(res_df$padj < .05))
+length(which(res_df$padj < .01))
+length(which(res_df$padj < .001))
+length(which(res_df$padj < .0001))
+length(which(res_df$padj < .00001))
+length(which(res_df$padj < .000001))
+```
+
+
+
+```{r}
+# Define significance and keep significant genes only.
+
+sig_genes <- res_df %>% 
+  arrange(padj) %>%
+  filter(padj < 0.001) # After review, 0.001 is a good balance for clustering. Stringent cutoff as taking all genes available
+
+sig_genes_anno <- res_anno %>% 
+  arrange(padj) %>%
+  filter(padj < 0.001) 
+```
+
+
+
+#Functions
+```{r}
+# Fetch the GENEID based on SYMBOL
+
+convert_list <- function(genes) {
+  
+  converted_genes <- sapply(genes, function(gene_name) {
+    
+    # Try to find a match in res_df first
+    matched_symbol <- res_df$GENEID[which(
+      res_df$SYMBOL == gene_name |
+      res_df$GENEID == gene_name  
+    )][1]
+    
+    # If not found in res_df, try annotations
+    if(is.null(matched_symbol)) {
+      matched_symbol_annotations <- annotations$GENEID[which(
+        annotations$SYMBOL == gene_name |
+        annotations$GENEID == gene_name 
+      )][1]
+      
+      if(!is.null(matched_symbol_annotations)) {
+        return(matched_symbol_annotations)
+      }
+    } else {
+      return(matched_symbol)
+    }
+    
+    # Return NA if not found in either
+    return(NA)
+  })
+  
+  # Identify genes that have no match in annotations
+  no_matches <- genes[is.na(converted_genes)]
+    if(length(no_matches) > 0) {
+    cat("No matches were found for genes:", paste(no_matches, collapse = ", "), "\n")
+  }
+  
+  
+  # Identify genes not expressed in limb (found in annotations but not in res_df)
+  not_expressed <- genes[!(genes %in% res_df$SYMBOL) & (genes %in% annotations$SYMBOL)]
+  if(length(not_expressed) > 0) {
+    cat("Genes in reference, but not expressed in Myotubes:", paste(not_expressed, collapse = ", "), "\n")
+  }
+
+  # Return the list of matched genes, excluding NA values
+  return(converted_genes[!is.na(converted_genes)])
+}
+
+# Example usage
+genes <- c("MTOR", "BCL9", "AMOTL1", "Bla", "2_13097645", "Tp53") %>%
+  convert_list()
+
+genes
+```
+
+```{r}
+convert_gid <- function(genes) {
+  
+  converted_genes <- sapply(genes, function(gene_name) {
+    
+    # Try to find a match in res_df first
+    matched_symbol <- res_df$SYMBOL[which(res_df$GENEID == gene_name)][1]
+    return(matched_symbol)
+    
+  })
+  return(converted_genes[!is.na(converted_genes)])
+}
+```
+
+
+
+
+```{r}
+plotGene <- function(gene_name, new_names = NULL, titlesize = 20, pvalue = res_df, ptitle = "padj 128h vs 120h:") {
+  
+  dds$timepoint <- as.numeric(as.character(dds$timepoint))
+  
+  gene_input <- convert_list(gene_name)
+  
+  gene_symbol <- res_df %>%
+     filter(GENEID == gene_input) %>%
+     pull(SYMBOL)
+  
+  # Function to plot for a single gene
+  plot_single_gene <- function(gene, new_name = NULL) {
+   
+    
+    dat <- plotCounts(dds, gene, intgroup = c("timepoint", "differentiation"), returnData = TRUE) %>%
+      mutate(logcount = log2(count + 1))
+    
+    mean_logcount <- dat %>%
+      group_by(timepoint) %>%
+      summarise(mean_logcount = mean(logcount)) 
+    
+    padj_value <- pvalue %>% 
+      filter(GENEID == gene) %>% 
+      pull(padj)
+    
+    sig_thr <- 0.05
+    formatted_padj <- ifelse(padj_value < sig_thr, 
+                             ifelse(padj_value < 1e-6, 
+                                    format(padj_value, digits = 3, scientific = TRUE),
+                                    round(padj_value, 6)),
+                             paste("ns", round(padj_value, 4)))
+    
+    ggplot(dat, aes(timepoint, logcount)) +
+      geom_point(aes(color = differentiation), size = 1.5) +
+      geom_line(data = mean_logcount, aes(x = timepoint, y = mean_logcount, group = 1), color = "#FF7F00", linewidth = 2) +
+      geom_vline(xintercept = 120, linetype = "dashed", color = "red", size = 1) + # Vertical line at x=120 dediff
+      labs(
+        title = paste(if (!is.null(new_name)) new_name else gene_symbol), 
+        x = "Timepoint (hours)", 
+        y = "Log2 expression count", 
+        color = "Differentiation",
+        caption = paste(ptitle, formatted_padj)
+      ) +
+      scale_x_continuous(breaks = seq(0, 168, by = 24)) +
+                           
+      scale_color_manual(values = c("diff" = "#68E807", "dediff" = "#7E10D1")) + 
+      theme_minimal() +
+      theme(
+        plot.title = element_text(color = "darkblue", size = titlesize, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(color = "darkblue", size = 20, face = "bold"),
+        axis.title.y = element_text(color = "darkblue", size = 20, face = "bold"),
+        legend.position = "right",
+        
+        axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),  
+        
+        legend.title = element_text(color = "darkblue", size = 14, face = "bold"),
+        legend.text = element_text(size = 14),
+        plot.caption = element_text(size = 14, face = "bold"),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5)  
+      )
+  }
+
+  # Check if input is a single gene or a list of genes, and handle new names accordingly
+  if (is.character(gene_input) && length(gene_input) == 1) {
+    # It's a single gene, plot it
+    new_name <- if (!is.null(new_names) && length(new_names) == 1) new_names else NULL
+    plot_single_gene(gene_input, new_name)
+  } else if (is.character(gene_input) && length(gene_input) > 1) {
+    # It's a list of genes, verify new_names match in length if provided
+    if (!is.null(new_names) && length(new_names) != length(gene_input)) {
+      stop("The length of New Names must match the length of Input.")
+    }
+
+    # It's a list of genes, plot them with corresponding new names
+    plots <- mapply(function(gene, new_name) {
+      tryCatch({
+        plot_single_gene(gene, new_name) 
+      }, error = function(e) {
+        cat(sprintf("Gene %s not found or error plotting.\n", gene))
+        NULL # Return NULL if gene not found or error occurs
+      })
+    }, gene_input, if (!is.null(new_names)) new_names else rep(NULL, length(gene_input)), SIMPLIFY = FALSE)
+    
+    for(i in seq_along(plots)) {
+      if (!is.null(plots[[i]])) {
+        print(plots[[i]])
+      }
+    }
+  } else {
+    stop("Input must be a single gene name or a list of gene names.")
+  }
+}
+```
+
+
+
+
+```{r}
+plotCount <- function(gene_name, new_names = NULL) {
+  
+  dds$timepoint <- as.numeric(as.character(dds$timepoint))
+  
+  gene_input <- convert_list(gene_name)
+  
+  gene_symbol <- res_df %>%
+     filter(GENEID == gene_input) %>%
+     pull(SYMBOL)
+  
+  # Function to plot for a single gene
+  plot_single_gene <- function(gene, new_name = NULL) {
+   
+    
+    dat <- plotCounts(dds, gene, intgroup = c("timepoint", "differentiation"), returnData = TRUE) 
+    
+    mean_count <- dat %>%
+      group_by(timepoint) %>%
+      summarise(mean_count = mean(count)) 
+    
+    padj_value <- res_df %>% 
+      filter(GENEID == gene) %>% 
+      pull(padj)
+    
+    sig_thr <- 0.05
+    formatted_padj <- ifelse(padj_value < sig_thr, 
+                             ifelse(padj_value < 1e-6, 
+                                    format(padj_value, digits = 3, scientific = TRUE),
+                                    round(padj_value, 6)),
+                             paste("ns", round(padj_value, 4)))
+    
+    ggplot(dat, aes(timepoint, count)) +
+      geom_point(aes(color = differentiation), size = 2) +
+      geom_line(data = mean_count, aes(x = timepoint, y = mean_count, group = 1), color = "#FF7F00", linewidth = 1) +
+      geom_vline(xintercept = 120, linetype = "dashed", color = "red", size = 1) + # Vertical line at x=120 dediff
+      labs(
+        title = paste("Newt Myotubes:", if (!is.null(new_name)) new_name else gene_symbol), 
+        x = "Timepoint (hours)", 
+        y = "Normalized Count", 
+        color = "Differentiation",
+        caption = paste("padj 8h Dediff:", formatted_padj)
+      ) +
+      scale_color_manual(values = c("diff" = "#68E807", "dediff" = "#7E10D1")) + 
+      theme_minimal() +
+      theme(
+        plot.title = element_text(color = "darkblue", size = 20, face = "bold", hjust = 0.5),
+        axis.title.x = element_text(color = "darkblue", size = 16, face = "bold"),
+        axis.title.y = element_text(color = "darkblue", size = 16, face = "bold"),
+        legend.position = "right",
+        legend.title = element_text(color = "darkblue", size = 14, face = "bold"),
+        legend.text = element_text(size = 10),
+        plot.caption = element_text(size = 10, face = "bold"),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5)  
+      )
+  }
+
+  # Check if input is a single gene or a list of genes, and handle new names accordingly
+  if (is.character(gene_input) && length(gene_input) == 1) {
+    # It's a single gene, plot it
+    new_name <- if (!is.null(new_names) && length(new_names) == 1) new_names else NULL
+    plot_single_gene(gene_input, new_name)
+  } else if (is.character(gene_input) && length(gene_input) > 1) {
+    # It's a list of genes, verify new_names match in length if provided
+    if (!is.null(new_names) && length(new_names) != length(gene_input)) {
+      stop("The length of New Names must match the length of Input.")
+    }
+
+    # It's a list of genes, plot them with corresponding new names
+    plots <- mapply(function(gene, new_name) {
+      tryCatch({
+        plot_single_gene(gene, new_name) 
+      }, error = function(e) {
+        cat(sprintf("Gene %s not found or error plotting.\n", gene))
+        NULL # Return NULL if gene not found or error occurs
+      })
+    }, gene_input, if (!is.null(new_names)) new_names else rep(NULL, length(gene_input)), SIMPLIFY = FALSE)
+    
+    for(i in seq_along(plots)) {
+      if (!is.null(plots[[i]])) {
+        print(plots[[i]])
+      }
+    }
+  } else {
+    stop("Input must be a single gene name or a list of gene names.")
+  }
+}
+```
+
+
+```{r}
+genex <- "g.584209"
+
+
+plotGene(genex)
+plotCount("HIF3A.1")
+```
+
+
+
+```{r}
+# Create annotation file for the heatmap (using transformed data)
+heat_anno <- as.data.frame(colData(vsd)[,c( "differentiation")])
+rownames(heat_anno) <- rownames(colData(vsd))
+colnames(heat_anno) <- "Differentiation"
+
+# Update heat_colors list to include timepoint gradient
+heat_colors <- list(
+    Differentiation = c("diff" = "#68E807", "dediff" = "#7E10D1"))
+```
+
+
+```{r}
+# Heatmap function. Always takes raw GENEID as input
+
+plotHeat <- function(gene_input, title, cluster_rows = TRUE, cuts = NULL, cellwidth = 20, cellheight = 30) {
+  
+  # First convert the gene list to GENEID
+  GENEID <- convert_list(gene_input)
+  
+  
+  gene_symbol <- convert_gid(GENEID)
+  
+  
+  # Helper function to get significance stars
+  get_stars <- function(gene) {
+    padj <- res_df[res_df$GENEID == gene, "padj"]
+    if (is.na(padj) || padj >= 0.05) return("")
+    if (padj < 0.001) return("***")
+    if (padj < 0.01) return("**")
+    return("*")
+  }
+  
+  # Modify the row names based on significance
+  modified_genes <- paste0(gene_symbol, sapply(GENEID, get_stars))
+  
+  pheatmap_args <- list(
+    mat = assay(vsd[GENEID,]),
+    cluster_rows = cluster_rows,
+    show_rownames = TRUE,
+    cluster_cols = FALSE,
+    annotation_col = heat_anno,
+    labels_row = modified_genes,
+    labels_col = coldata$timepoint,
+    scale = "row",
+    fontsize = 18,
+    fontsize_row = 18,
+    fontsize_col = 18,
+    main = paste(title),
+    annotation_colors = heat_colors,
+    cellwidth = cellwidth,
+    cellheight = cellheight,
+    width = 35,
+    gaps_col = 12 # Break after the 12th column, after Dediff induction
+  )
+
+  if (!is.null(cuts)) {
+    pheatmap_args$cutree_rows <- cuts
+  }
+
+  heatmap <- do.call(pheatmap, pheatmap_args)
+  
+  return(heatmap)
+}
+```
+
+
+
+```{r}
+# Plotting a set of genes 
+
+plotSet <- function(GO_ID, set_name, linesize = 2){
+
+  
+set_genes <- bitr(GO_ID, 
+                 fromType = "GOALL", # The common ID.
+                 toType = "SYMBOL", # The ID you want.
+                 OrgDb = 'org.Nviridescens.eg.db') %>%
+  dplyr::select(SYMBOL) %>%
+  distinct() %>%
+  pull(SYMBOL) %>%
+  convert_list()
+  
+
+
+set_genes <- res_df %>%
+  filter(GENEID %in% set_genes) %>%
+  arrange(padj)
+
+gene_set <- assay(vsd)[(convert_list(set_genes$SYMBOL)),]
+
+
+
+# Center the data by subtracting the row means.
+gene_set <- gene_set - rowMeans(gene_set)
+
+# Scale the data by dividing over sd per row.
+gene_set <- gene_set / rowSds(gene_set)
+
+
+# Join with the sample meta data in a long format.
+
+coldata_df <- as.data.frame(coldata) %>%
+  rownames_to_column(var = "sample")
+
+gene_set <- gene_set %>% 
+  as_tibble(rownames = "SYMBOL") %>%
+  pivot_longer(!SYMBOL, names_to = "sample", values_to = "counts") %>%
+  left_join(coldata_df, by = "sample") # Have to convert coldata to df before.
+  
+  
+head(gene_set)
+
+
+# Calculate the cluster expression means at each time point within each cluster.
+
+gene_set_means <- gene_set %>%
+  group_by(timepoint) %>%
+  summarize(mean_exp = mean(counts, na.rm = TRUE))
+
+gene_set_means$timepoint <- as.numeric(as.character(gene_set_means$timepoint))
+
+
+
+
+# Plot the mean gene_set progression
+
+gene_set_plot <- gene_set_means %>%
+  ggplot(aes(timepoint, mean_exp)) +
+  geom_line(size = linesize,
+            color = "dodgerblue") + 
+   geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) + # y=0 line
+      geom_vline(xintercept = 120, linetype = "dashed", color = "red", size = 1) + # Vertical line at x=120 dediff 
+
+  scale_color_brewer(palette = "Set1", name = "Cluster") + # Legend colors and title.
+  labs(
+    x = "Timepoint (hours)",
+    y = paste0("Z-score (n=", length(unique(gene_set$SYMBOL)), ")"),
+    title = set_name,
+  ) +
+  theme_minimal() + 
+  theme(
+    panel.background = element_rect(fill = "white"), # White background for panels.
+    strip.text = element_text(size = 25), # Increase the size of facet labels.
+    axis.text.x = element_text(size = 20), # Increase the size of x-axis labels
+    axis.text.y = element_text(size = 24), # Increase the size of y-axis labels
+    legend.text = element_text(size = 15),
+    title = element_text(size = 20)
+  ) +
+  scale_x_continuous(breaks = seq(0, 168, by = 24))
+
+  return(gene_set_plot)
+
+}
+```
+
+
+
+
+```{r}
+# Top 20 most sig. annotated genes without duplications
+
+top20 <- res_anno_single %>%
+  arrange(padj) %>% # lowest p-values on top
+  head(20) # First 20 genes
+  
+
+top20_heat <- plotHeat(top20$GENEID, "Top 20 DE Genes in MT Diff / Dediff", cuts = 4, cellwidth = 20, cellheight = 30)
+
+
+ggsave("Top 20 Annotated Unique DEG 8h Dediff.png", top20_heat, height = 10, width = 12, dpi = 1200)
+```
+
+
+
+
+#PCA
+```{r}
+vsd$timepoint <- as.numeric(as.character(vsd$timepoint))
+
+PCA <- plotPCA(vsd, intgroup = c("timepoint", "differentiation"), returnData = TRUE)
+
+percentVar <- round(100 * attr(PCA, "percentVar"))
+
+
+pca_mt <- ggplot(PCA, aes(x = PC1, y = PC2, color = timepoint, shape = differentiation)) +
+  geom_point(size = 11) +
+  geom_text(aes(label = timepoint), vjust = 1.5, hjust = 1, size = 8, color = "black") +
+  
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  
+   scale_color_gradientn(
+    colors = c("#B7DDEB", "#364B9A", "#FC4E07"),
+    breaks = c(24, 72, 120, 168)  # Specific breaks at 24, 120, and 168 hours
+  ) +
+  
+  ggtitle("Principal Component Analysis A1 Differentiation") +
+  
+  theme(
+    plot.title = element_text(size = 26),
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    
+    panel.background = element_rect(fill = "white"),  # white background
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),  # black border
+    panel.grid.major = element_line(color = "grey90"),  # light grey major grid
+    panel.grid.minor = element_line(color = "grey90")   # light grey minor grid
+  ) 
+
+pca_mt
+
+ggsave("MT PCA.png", pca_mt, width = 12, height = 8, units = "in", dpi = 1200)
+```
+
+
+
+#Volcano Plots
+```{r}
+volcano <- EnhancedVolcano(res_anno,
+    lab = res_anno$SYMBOL,
+    x = 'log2FoldChange',
+    y = 'padj',
+    pCutoff = 0.001,
+    FCcutoff = 1,
+    drawConnectors = TRUE,
+    max.overlaps = 10,
+    pointSize = 4,
+    labSize = 4,
+    axisLabSize = 18,
+    title = "8h Dedifferentiating Myotubes",
+    titleLabSize = 18,
+    caption = paste('FC cutoff, 1; padj cutoff, 0.001, Number of sig. annotated genes:', nrow(sig_genes_anno)),
+    captionLabSize = 15,
+    xlab = bquote(~Log[2] ~ "Fold change"),
+    ylab = bquote(~-Log[10] ~ italic(P)),
+    legendLabels=c('Not sig','Log (base 2) FC','p-value',
+      'sig'),
+    legendLabSize = 14,
+    col = c('grey30', 'grey30', 'grey30', 'red2'),
+    widthConnectors = 0.5,
+    borderWidth = 0.8,
+    legendPosition = 'right',
+    legendIconSize = 7)
+
+print(volcano)
+
+
+ggsave(filename = "Volcano 8h Dediff 0.001.png", plot = volcano, width = 10, height = 8, dpi = 1200)
+```
+
+
+
+```{r}
+volcano_hif3a <- EnhancedVolcano(res_anno,
+    lab = res_anno$SYMBOL,
+    x = 'log2FoldChange',
+    y = 'padj',
+    selectLab = c('HIF3A'),
+    pCutoff = 0.001,
+    FCcutoff = 1,
+    drawConnectors = TRUE,
+    max.overlaps = 10,
+    pointSize = 4,
+    labSize = 6.0,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = TRUE,
+    axisLabSize = 18,
+    title = "8h Dedifferentiating Myotubes",
+    titleLabSize = 18,
+    caption = paste('FC cutoff, 1; padj cutoff, 0.001, Number of sig. annotated genes:', nrow(sig_genes_anno)),
+    captionLabSize = 15,
+    xlab = bquote(~Log[2] ~ "Fold change"),
+    ylab = bquote(~-Log[10] ~ italic(P)),
+    legendLabels=c('Not sig','Log (base 2) FC','p-value',
+      'sig'),
+    legendLabSize = 14,
+    col = c('grey30', 'grey30', 'grey30', 'red2'),
+    widthConnectors = 0.5,
+    borderWidth = 0.8,
+    legendPosition = 'right',
+    legendIconSize = 7)
+
+print(volcano_hif3a)
+
+
+ggsave(filename = "HIF3A Volcano 8h Dediff 0.001.png", plot = volcano_hif3a, width = 10, height = 8, dpi = 1200)
+```
+
+
+#Clustering
+```{r}
+# Pick significant annotated genes. Annotated only since for profiling clusters SYMBOL is required.
+
+dim(sig_genes)
+
+sigs <- sig_genes$GENEID
+```
+
+
+```{r}
+# Matrix of genes to cluster.
+mat2clust <- assay(vsd)[sigs,]
+dim(mat2clust)
+
+# Center the data by subtracting the row means.
+mat2clust <- mat2clust - rowMeans(mat2clust)
+
+# Scale the data by dividing over sd per row.
+mat2clust <- mat2clust / matrixStats::rowSds(mat2clust)
+```
+
+
+#K means
+```{r}
+# Elbow or scree plot, in which the number of clusters is plotted on the x-axis, while WCSS is on the y-axis.
+
+# Decide how many clusters to look at
+n_clusters <- 12
+
+# Initialize total within sum of squares error: wss
+wss <- numeric(n_clusters)
+
+set.seed(123)
+
+# Look over 1 to n_clusters possible clusters
+for (i in 1:n_clusters) {
+  # Fit the model: km.out
+  km.out <- kmeans(mat2clust, centers = i, nstart = 20)
+  # Save the within cluster sum of squares
+  wss[i] <- km.out$tot.withinss
+}
+
+# Produce a scree plot
+wss_df <- tibble(clusters = 1:n_clusters, wss = wss)
+
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
+    geom_point(size = 4) +
+    geom_line() +
+    scale_x_continuous(breaks = 1:n_clusters) +
+    xlab('Number of clusters') +
+    geom_hline(
+        yintercept = wss, 
+        linetype = 'dashed' 
+        #col = c(rep('#000000', 6), '#FF0000', rep('#000000', 3)) # Adjusted for n_clusters
+    )
+scree_plot # 8 Is the optimal number
+```
+
+
+
+
+```{r}
+# K Means with the optimal number of clusters. MUST SET SEED, stochastic method!!!
+set.seed(123)
+
+nclust <- 8
+kmeans <- kmeans(mat2clust, centers = nclust, nstart = 20)
+kclusters <- kmeans$cluster
+
+# Required later for plotting
+cluster_sizes <- table(kclusters)
+cluster_sizes
+```
+
+
+```{r}
+# Initialize an empty list to store cluster genes
+cluster_genes_list <- list()
+cluster_list <- list()
+top20_list <- list()
+
+# Iterate from cluster 1 to cluster n
+for (i in 1:nclust) {
+  
+  cluster_genes_list[[paste0("kcluster", i, "_genes")]] <- names(kclusters[kclusters == i])
+
+  cluster_genes <- names(kclusters[kclusters == i])
+  cluster_list[[paste0("cluster", i)]] <- res_df %>%
+    filter(GENEID %in% cluster_genes)
+  
+  top20_genes <- res_df %>%
+    filter(GENEID %in% cluster_genes) %>%
+    arrange(padj) %>%
+    head(20) 
+
+  top20_list[[paste0("top20_c", i)]] <- top20_genes
+}
+
+
+# Creating separate variables for each cluster
+list2env(cluster_genes_list, envir = .GlobalEnv)
+list2env(cluster_list, envir = .GlobalEnv)
+list2env(top20_list, envir = .GlobalEnv)
+
+
+anno_top20_all_clusters <- do.call(rbind, top20_list)
+
+
+# Inspect the combined dataframe
+head(anno_top20_all_clusters)
+```
+
+
+```{r}
+# Plotting clusters on heatmaps for overview.
+
+# Create an empty list to store cluster plots
+cluster_plots <- list()
+
+for (i in 1:nclust) {
+  current_cluster_genes <- cluster_genes_list[[i]]
+  current_cluster_name <- paste("Cluster", i)
+  
+  current_cluster_plot <- pheatmap(
+    assay(vsd)[current_cluster_genes, ],
+    cluster_rows = FALSE,
+    show_rownames = FALSE,
+    cluster_cols = FALSE,
+    labels_col = coldata$timepoint,
+    annotation_col = heat_anno,
+    annotation_colors = heat_colors,
+    scale = "row",
+    fontsize_col = 10,
+    main = current_cluster_name,
+    width = 30
+  )
+  
+  cluster_plots[[paste0("cluster", i, "_plot")]] <- current_cluster_plot
+}
+```
+
+
+#Plotting Clusters
+```{r}
+clusters_df <- data.frame(SYMBOL = names(kclusters), 
+                          cluster = as.factor(kclusters))
+
+coldata_df <- coldata %>%
+  as_tibble(rownames = "sample") %>%
+  mutate(timepoint = as.numeric(as.character(coldata$timepoint)))
+```
+
+```{r}
+# Join with the sample meta data in a long format.
+
+mat_long <- mat2clust %>% 
+  as_tibble(rownames = "SYMBOL") %>%
+  pivot_longer(!SYMBOL, names_to = "sample", values_to = "counts") %>%
+  left_join(coldata_df, by = "sample") %>% # Have to convert coldata to df before.
+  left_join(clusters_df, by = "SYMBOL") # Add cluster metadata.
+  
+head(mat_long)
+```
+
+```{r}
+# Calculate the cluster expression means at each time point within each cluster.
+
+cluster_means <- mat_long %>%
+  group_by(cluster, timepoint) %>%
+  summarize(mean_exp = mean(counts, na.rm = TRUE))
+
+# Add cluster size information to cluster_means.
+cluster_means <- cluster_means %>%
+  mutate(cluster_label = paste(cluster, " (n=", cluster_sizes[as.character(cluster)], ")", sep=""))
+
+
+# Define the desired order of clusters (10 goes after 1 otherwise)
+cluster_order <- as.character(1:nclust)
+
+# Reorder the 'cluster_label' factor variable
+cluster_means$cluster_label <- factor(
+  cluster_means$cluster_label,
+  levels = paste(cluster_order, " (n=", cluster_sizes[cluster_order], ")", sep="")
+)
+```
+
+
+```{r}
+# Plot the mean cluster progression 
+
+cluster_plot <- mat_long %>%
+  ggplot(aes(timepoint, counts, group = SYMBOL)) +
+  
+  geom_line(aes(y = mean_exp, group = cluster_label, color = cluster_label),
+            data = cluster_means, size = 2.5) + # Plot mean expression
+
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) + # y=0 line
+  geom_vline(xintercept = 120, linetype = "dashed", color = "red", size = 1) + # Vertical line at x=120 dediff
+  scale_color_brewer(palette = "Set1", name = "Cluster") + # Legend colors and title
+  labs(
+    x = "Timepoint",
+    y = "Z-score",
+    title = "K-means Clustering of Significant Genes 8h Dedifferentiation"
+  ) +
+  theme_minimal() + 
+  theme(
+    panel.background = element_rect(fill = "white"), # White background for panels.
+    strip.text = element_text(size = 25), # Increase the size of facet labels.
+    axis.text.x = element_text(size = 25), # Increase the size of x-axis labels
+    axis.text.y = element_text(size = 30), # Increase the size of y-axis labels
+    legend.text = element_text(size = 23),
+    title = element_text(size = 20)
+  )  +
+  facet_wrap(~cluster, ncol=2, scales = "free_x") # Use the updated cluster_label for faceting
+
+cluster_plot
+
+ggsave("Myotubes Single Clusters 0.001.png", width = 12, height = 22)
+```
+
+
+
+
+
+#ClusterProfiler 
+```{r}
+# SET THE DESIRED ORGANISM HERE
+organism = "org.Nviridescens.eg.db"
+library(organism, character.only = TRUE)
+```
+
+
+#Cluster Comparison
+```{r}
+# Extract SYMBOL of all annotated genes in the experiment for ORA background. Has to be annotated genes only.
+background <- res_anno %>%
+  arrange(desc(padj)) %>% 
+  pull(padj, name = SYMBOL)
+
+
+# Create an empty list to store cluster genes
+genes_list <- list()
+
+for (i in 1:nclust) {
+  current_cluster <- cluster_list[[i]]
+  
+  current_cluster_genes <- current_cluster %>%
+    arrange(desc(padj)) %>%
+    pull(SYMBOL)
+  
+  genes_list[[paste0("genes", i)]] <- current_cluster_genes
+}
+
+# Optionally, if you want to create separate variables for each cluster
+list2env(genes_list, envir = .GlobalEnv)
+
+
+# Creating a list with information about cluster groups.
+genes_clusters <- list(Cluster_1 = as.character(genes1),
+                    Cluster_2 = as.character(genes2),
+                    Cluster_3 = as.character(genes3),
+                    Cluster_4 = as.character(genes4),
+                    Cluster_5 = as.character(genes5),
+                    Cluster_6 = as.character(genes6),
+                    Cluster_7 = as.character(genes7),
+                    Cluster_8 = as.character(genes8))
+```
+
+
+```{r}
+# Comparing clusters to each other. GO BP.
+cgo <- compareCluster(geneCluster = genes_clusters, 
+                      fun = enrichGO, 
+                      universe = names(background), 
+                      OrgDb = organism, 
+                      keyType = 'SYMBOL',
+                      readable = TRUE, 
+                      ont = "BP",
+                      minGSSize = 10,
+                      maxGSSize = 500,
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05) 
+
+
+cgo_df_0.001 <- as.data.frame(cgo)
+
+cgo_simple <- clusterProfiler::simplify(x = cgo, cutoff = 0.7) # Remove redundant GO terms
+
+# Generate the dotplot
+cgo_plot <- dotplot(cgo_simple, 
+                    showCategory = 10,
+                    
+        label_format = 80) + # Since what character length the label will wrap. 
+        theme_dose(12) + 
+        scale_fill_gradientn(colours = c("#f7ca64", "#46bac2", "#7e62a3"), 
+                          trans = "log10", 
+                          guide = guide_colorbar(reverse = TRUE, order = 1)) +
+        ggtitle("Top 10 Enriched GO BP Terms per 8h Dediff Cluster") 
+
+print(cgo_plot) 
+
+ggsave(filename = "0.001 Myotubes 8h Dediff GO BP.png", plot = cgo_plot, width = 14, height = 15, dpi = 1200)
+```
+
+
+```{r}
+# Cnetplot
+cnet_cgo <- cnetplot(cgo, showCategory = 5,
+         max.overlaps = 2)
+cnet_cgo
+
+
+ggsave(filename = "Cnetplot 0.001 Myotubes 8h Dediff GO BP.png", 
+       plot = cnet_cgo, 
+       width = 8, 
+       height = 10, 
+       units = "in", 
+       dpi = 1200)
+```
+
+
+
+
+
+# Re-analysis with 0h as base
+```{r}
+coldata2 <- coldata %>%
+  mutate(timepoint = relevel(factor(timepoint), ref = "0"), 
+         differentiation = factor(differentiation))
+
+
+# Create DESEq2 object
+dds2 <- DESeqDataSetFromTximport(txi,
+                                   colData = coldata2,
+                                   design = ~ timepoint)
+
+# Pre-filter -> at least 10 counts in 3 samples. N = minimal number of samples where non-zero counts would be considered interesting
+
+keep2 <- rowSums(counts(dds2) >= 10) >= 3
+dds2 <- dds2[keep2,]
+
+
+dds2 <- DESeq(dds2) 
+
+resultsNames(dds2)
+
+res2 <- lfcShrink(dds2, coef = "timepoint_120_vs_0", type = "apeglm") # Shrink inflated LFC for genes with low expression
+
+dds2$timepoint <- factor(dds2$timepoint, levels = c(0, 8, 72, 120, 128, 144, 168)) # Re-level factors back for plots
+```
+
+
+```{r}
+# Results with most significant genes on top  
+
+res_df2 <- as.data.frame(res2) %>%
+  rownames_to_column(var = "GENEID") %>%
+  left_join(annotations_gid, by = "GENEID") %>%
+  relocate(SYMBOL, .before = 1) %>%
+  arrange(padj) 
+
+vsd2 <- vst(dds2, blind = FALSE)
+```
+
+
+
+```{r}
+# Custom muscle marker plot, combining data from Sandberg alignment for missing genes
+
+muscle_diff <- c("Pax7", "Pax3", "des", "MYH2.2", "MYH7.2", "MYH4.1", "Tnnt1", "Myl4", "ACT1", "TPM1")
+
+muscle_diff_GENEID <- convert_list(muscle_diff)
+
+
+matrix_muscle <- assay(vsd2[muscle_diff_GENEID,])
+
+sandberg_muscle <- read.csv("muscle_diff.csv", row.names = 1)
+colnames(sandberg_muscle) <- colnames(matrix_muscle)
+
+matrix_muscle <- rbind(sandberg_muscle, matrix_muscle)
+```
+
+
+
+```{r}
+plotMuscle <- function(gene_input, title, cuts = NULL) {
+  
+  # First convert the gene list to GENEID
+  GENEID <- convert_list(gene_input)
+  
+  matrix_muscle <- assay(vsd2[GENEID,])   # Fetch gene input data
+  
+  
+  
+  sandberg_muscle <- read.csv("muscle_diff.csv", row.names = 1)
+  colnames(sandberg_muscle) <- colnames(matrix_muscle)
+  
+   
+  matrix_muscle <- rbind(sandberg_muscle, matrix_muscle)  # Append the missing genes
+  
+  gene_symbol <- c(rownames(sandberg_muscle), gene_input) # Fetch symbols
+  
+  
+  # Modify the row names based on significance
+  row_labels <- paste0(gene_symbol, "***")
+  
+  pheatmap_args <- list(
+    mat = matrix_muscle,
+    cluster_rows = TRUE,
+    show_rownames = TRUE,
+    cluster_cols = FALSE,
+    annotation_col = heat_anno,
+    labels_row = row_labels,
+    labels_col = coldata2$timepoint,
+    scale = "row",
+    fontsize = 18,
+    fontsize_row = 20,
+    fontsize_col = 20,
+    main = paste(title),
+    annotation_colors = heat_colors,
+    cellwidth = 30,
+    cellheight = 45,
+    width = 35,
+    gaps_col = 12 # Break after the 12th column, after Dediff induction
+  )
+
+  if (!is.null(cuts)) {
+    pheatmap_args$cutree_rows <- cuts
+  }
+
+  heatmap <- do.call(pheatmap, pheatmap_args)
+  
+  return(heatmap)
+}
+
+
+muscle_diff <- c("Pax7", "Pax3", "des", "MYH2.2", "MYH7.2", "MYH4.1", "Tnnt1", "Myl4", "ACT1", "TPM1")
+
+
+muscle_plot <- plotMuscle(muscle_diff, "A1 Myotube Differentiation", 2)
+
+
+ggsave("Muscle Differentiation.png", muscle_plot, height = 10, width = 14, dpi = 1200)
+```
+
+
+
+```{r}
+# Plotting overlapping SMADS 
+
+smads <- res_df %>%
+  filter(SYMBOL %in% c("SMAD1", "SMAD3")) %>%
+  arrange(padj)
+
+smads <- assay(vsd)[(convert_list(smads$SYMBOL)),]
+
+
+# Center the data by subtracting the row means.
+smads <- smads - rowMeans(smads)
+
+# Scale the data by dividing over sd per row.
+smads <- smads / rowSds(smads)
+
+
+# Join with the sample meta data in a long format.
+
+coldata_df <- as.data.frame(coldata) %>%
+  rownames_to_column(var = "sample")
+
+smads <- smads %>% 
+  as_tibble(rownames = "SYMBOL") %>%
+  mutate(SYMBOL = case_when(
+   SYMBOL == "g.382618" ~ "SMAD3",
+   SYMBOL == "g.320517" ~ "SMAD1",
+   TRUE ~ SYMBOL
+ )) %>%
+  pivot_longer(!SYMBOL, names_to = "sample", values_to = "counts") %>%
+  left_join(coldata_df, by = "sample") %>% # Have to convert coldata to df before.
+  mutate(timepoint = as.numeric(as.character(timepoint))) 
+  
+
+# Calculate the cluster expression means at each time point within each cluster.
+
+smad_means <- smads %>%
+  group_by(SYMBOL, timepoint) %>%
+  summarize(mean_exp = mean(counts, na.rm = TRUE)) %>%
+  mutate(timepoint = as.numeric(as.character(timepoint))) 
+
+
+
+
+# Plot the mean smads progression
+
+smads_plot <- ggplot(smads, aes(timepoint, counts, color = SYMBOL)) +
+  
+  geom_point(size = 2, alpha = 0.5) +
+  
+  geom_line(data = smad_means, 
+            aes(x = timepoint, y = mean_exp, color = SYMBOL), 
+            linewidth = 2) +
+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) + 
+  geom_vline(xintercept = 120, linetype = "dashed", color = "red", size = 1) + 
+  
+  #scale_color_manual(values = c("SMAD1" = "red", "SMAD3" = "blue")) + 
+  labs(
+    x = "Timepoint (hours)",
+    y = paste0("Z-score"),
+    title = "SMADs"
+  ) +
+  theme_minimal() + 
+  theme(
+    panel.background = element_rect(fill = "white"),
+    strip.text = element_text(size = 25),
+    axis.text.x = element_text(size = 20),
+    axis.text.y = element_text(size = 24),
+    legend.text = element_text(size = 15),
+    title = element_text(size = 20)
+  ) +
+  scale_x_continuous(breaks = seq(0, 168, by = 24))
+
+smads_plot
+
+ggsave(plot = smads_plot, "Overlapping SMAD1 SMAD3.png", width = 10, height = 4, dpi = 1200)
+```
+
+
+
+# SAVING PLOTS
+```{r}
+# Gene Expression Plots
+plotGene("LDHA", "Lactate Dehydrogenase (LDHA)", pvalue = res_df2, ptitle = "padj 120h vs 0h:")
+ggsave("LDHA.png", height = 6, width = 8, dpi = 1200)
+
+
+plotGene("pkm.3", "Pyruvate Kinase (PKM)", pvalue = res_df2, ptitle = "padj 120h vs 0h:")
+ggsave("PKM.png", height = 6, width = 8, dpi = 1200)
+
+
+plotGene("TGFB1.1", "TGFB1", titlesize = 26)
+ggsave("TGFB1.png", 
+       height = 6, width = 8, dpi = 1200)
+
+
+plotGene("HIF3A")
+ggsave("HIF3A.png", height = 4, width = 8, dpi = 1200)
+
+
+plotGene("ARNT.3", "ARNT (HIF1B)", pvalue = res_df2, ptitle = "padj 120h vs 0h:")
+ggsave("HIF1B.png", height = 5, width = 8, dpi = 1200)
+
+
+plotGene("EPAS1.3", "EPAS1 (HIF2A)", pvalue = res_df2, ptitle = "padj 120h vs 0h:")
+ggsave("HIF2A.png", height = 5, width = 8, dpi = 1200)
+
+
+plotGene("EGLN2", "EGLN2 (PHD1)")
+ggsave("EGLN2.png", height = 5, width = 8, dpi = 1200)
+```
+
+
+
+```{r}
+# Gene Set Plots
+go_cell_division <- plotSet("GO:0051301", "Cell Division GO Gene Set")
+go_cell_division
+ggsave("Cell Division GO Gene Set.png", width = 7.5, height = 8, dpi = 1200)
+
+
+
+go_tca <- plotSet("GO:0006099", "Tricarboxylic Acid Cycle GO Gene Set")
+go_tca
+ggsave("Tricarboxylic Acid Cycle GO Gene Set.png", width = 7, height = 6, dpi = 1200)
+
+
+
+go_etc <- plotSet("GO:0022900", "Electron Transport Chain GO Gene Set")
+go_etc
+ggsave("Electron Transport Chain GO Gene Set.png", width = 7, height = 6, dpi = 1200)
+
+
+
+mmp <- plotSet("GO:0004222", "Metalloendopeptidase Activity GO Gene Set")
+mmp
+ggsave("MMP GO Gene Set.png", width = 10, height = 6, dpi = 1200)
+
+
+
+proteolysis <- plotSet("GO:0006508", "Proteolysis GO Gene Set")
+proteolysis
+ggsave("Proteolysis GO Gene Set.png", width = 10, height = 6, dpi = 1200)
+```
+
+
+```{r}
+# Heatmaps
+bmp <- c("SMAD1", "Smad5", "BMP2", "Bmp6", "SMAD9")
+bmp <- plotHeat(bmp, "BMP-SMADs")
+
+ggsave("BMP-SMAD's.png", bmp, width = 13, height = 4, dpi = 1200)
+
+
+
+
+
+
+tgfbeta <- c("SMAD2", "SMAD3", "TGFB1.1", "Tgfb2.2", "Tgfb3", "RUNX2", "fn1.1")
+tgfbeta <- plotHeat(tgfbeta, "TGFbeta-SMADs and Downstream Targets", 
+                    cellwidth = 25)
+
+ggsave("TGFbeta-SMADs and Downstream Targets.png", tgfbeta, 
+       width = 14, 
+       height = 6, 
+       dpi = 1200)
+
+
+
+tgfbeta_inh <- c("SMAD7", "SMURF2", "BAMBI", "pmepa1", "PPM1A")
+tgfbeta_inh <- plotHeat(tgfbeta_inh, "TGFbeta Signalling Inhibitors",
+                        cellheight = 40,
+                        cellwidth = 25)
+
+ggsave("TGFbeta Signalling Inhibitors.png", tgfbeta_inh, 
+       width = 14, 
+       height = 4, 
+       dpi = 1200)
+
+
+
+hypoxia <- c("ARNT.3", "EGLN1", "EGLN2", "EGLN3", "Crebbp.2", "Ep300",   # Other pathway members
+             
+             "HIF1A", "HIF1AN", "pkm.3", "LDHA",  # HIF1A
+             
+             "EPAS1.3", "PPARGC1A.1", "BHLHE40", "SOX2.1", "SPRY1", # HIF2A
+             
+             "VEGFA.1", # Hif1/2 regulated
+             
+             "HIF3A")
+
+
+hypoxia_plot <- plotHeat(hypoxia, "Hypoxic Signaling Genes",
+                         cuts= 6, cellheight = 28, cellwidth = 30)
+
+
+ggsave("Hypoxic Signaling Genes.png", hypoxia_plot, height = 10, width = 15, dpi = 1200)
+```
+
+
+#END
+```{r}
+sessionInfo()
+```
+

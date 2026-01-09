@@ -1,0 +1,326 @@
+---
+title: "IPA Plotting"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+})
+
+pacman::p_load(data.table, tidyverse, BiocManager, pheatmap, RColorBrewer, gridExtra, circlize, ComplexHeatmap)
+```
+
+
+#PREPARING DATA
+```{r}
+# Load in annotations
+
+annotations_combined <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Combined Annotations Nvir/Nvir_annotations_combined.csv", header = TRUE)
+
+# Katia annotations
+annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+head(annotations)
+```
+
+
+```{r}
+
+dir <- getwd()
+
+list.files(dir)
+```
+
+```{r}
+ipa_cp_raw <- read.csv(file.path(dir, "Sequential Comparsion LFC 0.5 p 0.001 MT CP.csv"), header = TRUE, check.names = FALSE) 
+
+
+ipa_cp_raw[-1] <- lapply(ipa_cp_raw[-1], function(x) {
+  if (is.character(x)) {
+    as.numeric(as.character(x))
+  } else {
+    x
+  }
+}) 
+
+ipa_cp_raw <- ipa_cp_raw %>%
+  as.matrix() %>%
+  replace(is.na(.), 0)
+```
+
+
+
+```{r}
+# Shorten some names
+
+ipa_cp_raw <- as.data.frame(ipa_cp_raw) %>%
+  mutate(`Canonical Pathways` = case_when(
+    `Canonical Pathways` == "The citric acid (TCA) cycle and respiratory electron transport" ~ "TCA & Respiratory Electron Chain",
+    `Canonical Pathways` == "Acetyl-CoA Biosynthesis I (Pyruvate Dehydrogenase Complex)" ~ "Acetyl-CoA Biosynthesis I",
+    TRUE ~ `Canonical Pathways`
+  ))
+```
+
+
+#Pathway Z-Score Plots
+```{r}
+# Function plotting IPA pathway activity data as a heatmap
+
+
+plotPathway <- function(pathways, name, height, width) {
+  
+  # Sample data preparation
+  ipa_cp <- as.data.frame(ipa_cp_raw) %>%
+    filter(`Canonical Pathways` %in% pathways) %>%
+    column_to_rownames(var = "Canonical Pathways") 
+  
+  # Convert to numeric
+  ipa_cp[] <- lapply(ipa_cp, as.numeric)
+  
+  # Reorder pathways
+  ipa_cp <- ipa_cp[pathways, ]
+  
+  # Set up PNG device
+  png(
+    filename = paste0(name, ".png"),
+    width = width,      
+    height = height,      
+    units = "in",
+    res = 1200       
+  )
+  
+  # Create heatmap
+  ht <- Heatmap(
+    as.matrix(ipa_cp), 
+    name = "Pathway Activity", 
+    col = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100), # Same as in pheatmap
+    column_title = name, 
+    row_title = "IPA Pathways",
+    
+    # Clustering settings
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    show_column_dend = FALSE,
+    
+    # Legend settings
+    show_heatmap_legend = TRUE,
+    heatmap_legend_param = list(
+      title = "Pathway Activity Z-Score",
+      legend_direction = "vertical",
+      legend_height = unit(4, "cm"),
+      title_position = "leftcenter-rot",
+      legend_gap = unit(2, "cm")
+    ),
+    
+    # Size and appearance
+    width = unit(10, "cm"),
+    height = unit(5, "cm"),  # 6
+    row_names_gp = gpar(fontsize = 13),  # 20
+    column_names_gp = gpar(fontsize = 11), # 15
+    
+    
+    # Additional settings
+    column_split = c(rep(1, 3), rep(2, ncol(ipa_cp) - 3)),
+    border = TRUE
+  )
+  
+  # Draw the heatmap with extended padding and legend placement
+  draw(
+    ht, 
+    padding = unit(c(2, 2, 2, 2), "cm"),  # top, right, bottom, left padding
+    heatmap_legend_side = "left"           # Ensure legend is placed on the right side of the heatmap
+  )
+  
+  # Close the PNG device
+  dev.off()
+  
+  # Return the heatmap object invisibly
+  return(invisible(ht))
+}
+```
+
+```{r}
+tp53 <- c(
+  
+  'p53 Signaling'
+              
+              )
+
+
+tgfbeta <- c(
+  
+  'TGF-β Signaling'
+          
+              )
+
+
+bmp <- c(
+  
+  'Signaling by BMP'
+  
+)
+
+
+
+
+
+hypoxia <- c(
+  
+  'Cellular response to hypoxia'
+  
+)
+
+
+
+tca_oxphos <- c(
+  
+  'TCA & Respiratory Electron Chain',
+  'Mitochondrial biogenesis',
+  'Acetyl-CoA Biosynthesis I'
+  
+)
+```
+
+
+```{r}
+plotPathway(tgfbeta, "TGF-β", height = 4, width = 8)
+
+
+plotPathway(bmp, "BMP", height = 4, width = 8)
+
+
+plotPathway(tp53, "p53", height = 4, width = 8)
+
+
+plotPathway(tca_oxphos, "Metabolic Changes", 5, 9)
+
+
+plotPathway(hypoxia, "Cellular Response to Hypoxia", height = 4, width = 10)
+```
+
+
+
+#Upstream Regulators Z-Score Plots
+```{r}
+list.files(dir)
+
+ipa_ur_raw <- read.csv(file.path(dir, "Sequential Comparsion LFC 0.5 p 0.001 MT UR.csv"), header = TRUE, check.names = FALSE) 
+
+
+# Get top 20
+ipa_ur <- ipa_ur_raw[1:20, ]
+
+# Replace NA with zero for plotting
+ipa_ur[ipa_ur == "N/A"] <- 0
+
+
+# Set row names and remove the column
+rownames(ipa_ur) <- ipa_ur[, "Upstream Regulators"]
+ipa_ur <- ipa_ur[, colnames(ipa_ur) != "Upstream Regulators"]
+
+
+
+# Ensure it's a matrix
+ipa_ur <- as.matrix(ipa_ur)
+```
+
+
+
+
+
+```{r}
+plotRegulator <- function(name, cellwidth, cellheight, height, width) {
+  
+  # Convert to numeric
+  rownames <- rownames(ipa_ur)
+  ipa_ur <- apply(as.matrix(ipa_ur), 2, as.numeric)
+  rownames(ipa_ur) <- rownames
+  
+  # Get the range of values for color mapping
+  min_val <- min(ipa_ur, na.rm = TRUE)
+  max_val <- max(ipa_ur, na.rm = TRUE)
+  
+  # Create color mapping same as pheatmap
+  col_fun = colorRamp2(
+    breaks = seq(min_val, max_val, length = 7),
+    colors = rev(brewer.pal(n = 7, name = "RdYlBu"))
+  )
+
+  
+  # Set up PNG device
+  png(
+    filename = paste0(name, ".png"),
+    width = width,      
+    height = height,      
+    units = "in",
+    res = 1200       
+  )
+  
+  
+  
+  # Create heatmap
+  ht <- Heatmap(
+    as.matrix(ipa_ur), 
+    name = "Upstream Regulators", 
+    col = col_fun,
+    column_title = name, 
+    row_title = "IPA Upstream Regulators",
+    
+    # Clustering settings
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    show_column_dend = FALSE,
+    
+    # Legend settings
+    show_heatmap_legend = TRUE,
+    heatmap_legend_param = list(
+      title = "UR Activity Z-Score",
+      legend_direction = "vertical",
+      legend_height = unit(4, "cm"),
+      title_position = "leftcenter-rot",
+      legend_gap = unit(2, "cm")
+    ),
+    
+    # Size and appearance
+    width = unit(cellwidth, "cm"),
+    height = unit(cellheight, "cm"),  # 6
+    row_names_gp = gpar(fontsize = 13),  # 20
+    column_names_gp = gpar(fontsize = 11), # 15
+    
+    
+    # Additional settings
+    column_split = c(rep(1, 3), rep(2, ncol(ipa_ur) - 3)),
+    border = TRUE
+  )
+  
+  # Draw the heatmap with extended padding and legend placement
+  draw(
+    ht, 
+    padding = unit(c(2, 2, 2, 2), "cm"),  # top, right, bottom, left padding
+    heatmap_legend_side = "left"           # Ensure legend is placed on the right side of the heatmap
+  )
+  
+  # Close the PNG device
+  dev.off()
+  
+  # Return the heatmap object invisibly
+  return(invisible(ht))
+}
+```
+
+
+```{r}
+plotRegulator("Top 20 IPA Upstream Regulators", 
+              cellwidth = 12, cellheight = 20, 
+              width = 9, height = 10)
+```
+
+
+#END
+```{r}
+sessionInfo()
+```
+

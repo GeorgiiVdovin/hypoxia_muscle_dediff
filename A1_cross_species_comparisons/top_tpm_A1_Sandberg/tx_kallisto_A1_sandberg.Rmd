@@ -1,0 +1,116 @@
+---
+title: "Top GEX Kallisto MT Sandberg"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
+    install.packtimepoints("BiocManager")
+})
+
+pacman::p_load(dplyr, data.table, ggplot2, BiocManager, readr, tximport, DESeq2)
+```
+
+###############
+#PREPARING DATA
+###############
+
+```{r}
+# Load in annotations
+
+file_path <- "C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1_Sandberg/Sandberg_annotation/Nvir_annotation_sandberg_latest.csv"
+
+# Read the gzipped text file
+annotations <- read.csv(file_path, header = TRUE)
+
+head(annotations)
+```
+
+
+```{r}
+# Read in salmon abundance files
+
+dir <- "C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1_Sandberg/kallisto_MT_Sandberg_reference"
+
+list.files(dir)
+```
+
+
+
+```{r}
+files <- file.path(dir, c("Ctrl_0h_1_ Abundances (tabular).tabular", 
+                          "Ctrl_0h_2_ Abundances (tabular).tabular", 
+                          "Ctrl_0h_3_ Abundances (tabular).tabular"))
+all(file.exists(files))
+
+names(files) <- c("Ctrl_0h_1", "Ctrl_0h_2", "Ctrl_0h_3")
+
+files
+```
+
+```{r}
+txi.kallisto <- tximport(files, 
+                         type = "kallisto", 
+                         txOut = TRUE) # Tx level as no tx2gene mapping
+
+abundance <- txi.kallisto$abundance # Extract TPM
+```
+
+
+###########
+#Median GEX
+###########
+```{r}
+# Calculate median TPM values for every gene across replicates => more resistant to outliers
+
+median_tpm <-  rowMedians(abundance) 
+
+median_tpm <- data.frame(median_tpm, 
+                         target_id = rownames(abundance))
+```
+
+
+```{r}
+# Sort genes by median TPM value
+
+median_tpm <- median_tpm %>%
+  left_join(annotations, by = "target_id") %>%
+  
+  arrange(desc(median_tpm)) %>%
+  mutate(rank = row_number())  %>%  # Add "Rank" metric after sorting
+  mutate(percentile = ntile(median_tpm, 100)) %>% # Calculate the expression percentiles for every gene
+    
+  relocate(rank, .after = target_id) %>%
+  relocate(percentile, .after = rank) 
+
+
+
+median_tpm$median_tpm <- round(median_tpm$median_tpm, 2)
+
+
+
+median_tpm <- median_tpm %>% mutate(logmedian = log2(median_tpm + 1))  # Log-transform 
+
+median_tpm$logmedian <- round(median_tpm$logmedian, 2)
+```
+
+
+```{r}
+missing_genes_myogenesis <- median_tpm %>%
+  dplyr::filter(SYMBOL %in% c("MYF-5", "MYOG", "MRF-4"))
+
+missing_genes_myogenesis$SYMBOL <- c("Myf5", "Myog", "Myf6")
+
+
+write.csv(missing_genes_myogenesis, "Myogenesis_genes_Sandberg.csv", row.names = FALSE)
+```
+
+
+####
+#END
+####
+```{r}
+sessionInfo()
+```

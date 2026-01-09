@@ -1,0 +1,397 @@
+---
+title: "A1 SC Data"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup}
+options(Seurat.object.assay.version = "v5")
+
+suppressPackageStartupMessages({
+  
+  library(Seurat, quietly = TRUE)
+  library(SeuratObject, quietly = TRUE)
+  
+})
+
+pacman::p_load(data.table, tidyverse, scater, BiocManager, patchwork, hdf5r, SingleCellExperiment)
+```
+
+
+```{r}
+# Transcript to gene map
+
+tx2gene <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/tx2gene_katia/tx2gene_nvir_katia.csv")
+```
+
+
+```{r}
+# Read in object 
+
+raw_data <- Read10X_h5("a1_filtered_feature_bc_matrix.h5")
+
+raw_data <- CreateSeuratObject(counts = raw_data, 
+                               project = "A1_Cells")
+
+head(row.names(raw_data))
+# Counts are stored in raw_data[["RNA"]]$counts
+
+tx_counts <- raw_data[["RNA"]]$counts %>%
+  as.data.frame()
+```
+
+
+
+```{r}
+# Summarize tx to genes
+rownames(tx_counts) <- gsub("-", "_", rownames(tx_counts))
+
+# Merge with mapping df
+tx_counts <- tx_counts %>% 
+  rownames_to_column(var = "TXNAME") %>% 
+  left_join(tx2gene, by = "TXNAME")
+
+
+setDT(tx_counts)
+gene_counts <- tx_counts[, lapply(.SD, sum, na.rm = TRUE), by = GENEID, .SDcols = is.numeric]
+setkey(gene_counts, GENEID)
+```
+
+
+
+```{r}
+# Load in annotations
+annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+gene2symbol <- annotations %>%
+  select(SYMBOL, GENEID) %>%
+  distinct(GENEID, .keep_all = TRUE)  %>%
+  mutate(SYMBOL = ifelse(GENEID == "g.345663", "ACTA2.1", SYMBOL)) # Smooth muscle actin was labeled with a protein name ACTS
+
+
+head(gene2symbol)
+```
+
+
+
+```{r}
+# Annotated cell / counts matrix
+
+gene_counts <- gene_counts %>%
+  left_join(gene2symbol, by = "GENEID") %>%
+  select(-GENEID) %>%
+  column_to_rownames(var = "SYMBOL")
+```
+
+
+
+
+```{r}
+# Seurat object
+
+seu <- CreateSeuratObject(counts = gene_counts, 
+                                         project = "A1_Cells", 
+                                         min.cells = 3, 
+                                         min.features = 200)
+```
+
+
+
+
+```{r}
+# Annotated counts
+
+counts <- seu[["RNA"]]$counts %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SYMBOL")
+
+annotations <- annotations %>%
+  mutate(SYMBOL = gsub("_", "-", SYMBOL))
+
+counts_anno <- counts %>%
+  left_join(annotations, by = "SYMBOL")
+
+expressed_genes <- counts_anno %>%
+  select(GENEID, txid, SYMBOL, Description_SP, Description_IP, pident_SP, evalue_SP, bitscore_SP, stitle_SP, Uniprot_SP, annotation_status)
+```
+
+
+```{r}
+# QC and selecting cells for further analysis
+
+nvir_mt <- c("MT-Nd5","MT-TH") # Only 2 mitochondrial genes detected
+
+
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, features = nvir_mt)
+
+
+VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+seu
+```
+
+
+#Filtering
+
+```{r}
+# Filtering low quality cells 
+
+seu <- subset(seu, 
+              subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5) # unique feature counts over 2.500 or less than 200, mt content < 5%
+
+seu
+```
+
+#Normalization
+
+```{r}
+# Normalized values are in seu[["RNA"]]$data
+
+# Normalizing the data
+seu <- NormalizeData(seu) # Log normalization with scale.factor = 10.000 is default
+
+# Identification of highly variable features. Takes 2000 genes by default that will then be used for dim. reduction
+seu <- FindVariableFeatures(seu, 
+                            selection.method = "vst", 
+                            nfeatures = 2000)
+
+# Top 10 genes
+top10 <- expressed_genes[expressed_genes$SYMBOL %in% head(VariableFeatures(seu), 10), ]
+
+plot1 <- VariableFeaturePlot(seu)
+plot2 <- LabelPoints(plot = plot1, points = top10$SYMBOL, repel = TRUE)
+plot1 + plot2
+
+
+top10
+```
+
+
+```{r}
+# Scaling the data. Results are in seu[["RNA"]]$scale.data
+all.genes <- rownames(seu)
+seu <- ScaleData(seu, features = all.genes)
+```
+
+
+
+#Cell-cycle regression
+```{r}
+# Identify the CC genes
+cell_cycle <- expressed_genes %>%
+  mutate(SYMBOL_cc = str_to_upper(str_remove(SYMBOL, "-.*"))) 
+
+
+# S phase gene list
+s.genes <- cc.genes.updated.2019$s.genes
+
+s.genes <- cell_cycle %>%
+  filter(SYMBOL_cc %in% s.genes) %>%
+  pull(SYMBOL)
+
+
+# G2m gene list
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+g2m.genes <- cell_cycle %>%
+  filter(SYMBOL_cc %in% g2m.genes) %>%
+  pull(SYMBOL)
+
+
+
+# Assign each cell a score, based on its expression of G2/M and S phase markers
+seu <- CellCycleScoring(seu, 
+                        s.features = s.genes, 
+                        g2m.features = g2m.genes, 
+                        set.ident = TRUE)
+
+head(seu[[]])
+
+
+RidgePlot(seu, features = head(s.genes), ncol = 2)
+```
+
+```{r}
+# Cell cycle PCA
+
+seu <- RunPCA(seu, features = c(s.genes, g2m.genes))
+DimPlot(seu)
+
+
+CC_plot <- DimPlot(seu) + theme(axis.title = element_text(size = 18), 
+                                legend.text = element_text(size = 18)) +
+    guides(colour = guide_legend(override.aes = list(size = 10)))
+
+CC_plot
+
+ggsave(filename = "cc_plot.png", height = 4, width = 8, plot = CC_plot, dpi = 1200)
+```
+
+```{r}
+# Regressing out CC genes and re-scaling  
+
+seu <- ScaleData(seu, 
+                 vars.to.regress = c("S.Score", "G2M.Score"), 
+                 features = rownames(seu))
+
+seu <- RunPCA(seu, features = c(s.genes, g2m.genes)) # "Corrected" matrix
+
+
+CC_regressed_plot <- DimPlot(seu) + theme(axis.title = element_text(size = 18), 
+                                legend.text = element_text(size = 18)) +
+    guides(colour = guide_legend(override.aes = list(size = 10)))
+
+CC_regressed_plot
+
+ggsave(filename = "cc_regressed_plot.png", height = 4, width = 8, plot = CC_regressed_plot, dpi = 1200)
+```
+
+
+# PCA
+```{r}
+# Perform linear dimensional reduction on the variable genes after CC regression
+seu <- RunPCA(seu, 
+              features = VariableFeatures(object = seu),
+              npcs = 16)
+
+
+VizDimLoadings(seu, 
+               dims = 1:2,        # "Loadings" of the first 2 PC's. Loading -> how much a feature contributes to the PC
+               reduction = "pca") # Plot shows genes with highest variation across clusters
+
+
+
+
+DimPlot(seu, reduction = "pca") + NoLegend()
+```
+
+
+```{r}
+plot <- ElbowPlot(seu,
+          ndims = 16)
+
+plot + scale_x_continuous(n.breaks = 10)
+```
+
+```{r}
+# Show primary sources of heterogeneity in a dataset, can be useful when trying to decide which PCs to include for further downstream analyses
+
+DimHeatmap(seu, dims = 1, 
+           cells = 500,        # Show 500 cells on either extreme end of PC1
+           balanced = TRUE)
+
+
+DimHeatmap(seu, dims = 1:16, cells = 500, balanced = TRUE)
+```
+
+
+
+
+#Clustering
+```{r}
+set.seed(42)
+seu <- FindNeighbors(seu, 
+                     dims = 1:16) # Which PC's to take as input
+
+
+set.seed(42)
+seu <- FindClusters(seu, resolution = 1)
+
+head(Idents(seu), 5) # To show the detected clusters
+```
+
+
+#UMAP 
+```{r}
+# Run non-linear dimensional reduction (UMAP). 
+# All visualization techniques have limitations, and cannot fully represent the complexity of the data. Leverage UMAP for visualization, but avoid drawing biological conclusions solely on the basis of visualization techniques
+
+set.seed(42)
+seu <- RunUMAP(seu, dims = 1:16)
+
+DimPlot(seu, 
+        reduction = "umap",
+        label = TRUE)
+```
+
+
+
+# Annotation
+```{r}
+levels(Idents(seu))
+
+
+# String of new cluster names 
+cluster_id_all <- c("Translation", "Translation", "Translation", "Translation", "Translation_hi", "Translation", "Translation", "Translation", "Translation")
+
+length(cluster_id_all)
+
+
+
+names(cluster_id_all) <- levels(seu)
+
+
+# Rename cluster ID's
+seu <- RenameIdents(seu, cluster_id_all)
+
+seu$cell_type <- Idents(seu)
+
+
+# Object can be saved here for shiny
+saveRDS(seu, file = "a1_lognorm_cc.rds")
+```
+
+
+# Load object
+```{r eval = FALSE}
+seu <- readRDS(file = "a1_lognorm_cc.rds")
+```
+
+# Cluster Markers
+```{r}
+# Finding differentially expressed features (cluster biomarkers)
+
+seu.markers <- FindAllMarkers(seu, 
+                              only.pos = TRUE) # Test each cluster against the rest
+
+seu.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+
+top_genes <- seu.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 30) %>%
+    ungroup()
+```
+
+
+
+
+# Highest Expressed Genes
+```{r}
+
+avg_expression <- AverageExpression(
+  seu,
+  assays = "RNA",
+  layer = "data",
+  group.by = "orig.ident",
+  verbose = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SYMBOL") %>%
+  arrange(desc(RNA)) %>%
+  mutate(avgLogGEX = log1p(RNA))
+  
+scaled.gex <- seu@assays$RNA$data %>%
+  as.data.frame()
+
+head(avg_expression)
+```
+
+
+#END
+```{r}
+sessionInfo()
+```
+
