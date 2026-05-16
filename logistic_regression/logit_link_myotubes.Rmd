@@ -9,8 +9,9 @@ editor_options:
 ---
 
 ```{r setup}
-pacman::p_load(data.table, ggplot2, dplyr, tibble, emmeans)
+# To add a new package: renv::install("packageName") or renv::install("bioc::packageName"), then renv::snapshot(). Snapshots are always run in the console 
 
+pacman::p_load(data.table, ggplot2, dplyr, tibble, emmeans)
 set.seed(42)
 ```
 
@@ -26,6 +27,7 @@ hypoxia_rep <- read.csv(paste0(results_path, "/Hypoxia_Dediff_results_repeated.c
 
 tgfbeta_dediff <- read.csv(paste0(results_path, "/TGFbeta_Dediff_7d_new_results.csv"))
 tgfbeta_diff <- read.csv(paste0(results_path, "/TGFbeta_Diff_7d_new_results.csv"))
+tgfbeta_diff_0_25 <- read.csv(paste0(results_path, "/TGFbeta_Diff_0.25%_5d_results.csv"))
 ```
 
 
@@ -182,7 +184,8 @@ pairs_5g
 
 
 
-# Figure 4H TGFbeta Dedifferentiation 
+# Figure 4 TGFbeta Inhibition
+# 4H
 ```{r}
 tgfbeta_dediff <- tgfbeta_dediff %>%
   mutate(
@@ -230,7 +233,51 @@ pairs_tgfbeta_dediff
 ```
 
 
-# Figure 4 TGFbeta Differentiation 
+
+# 4I Diff 0.25% TGFBi
+```{r}
+tgfbeta_diff_0_25 <- tgfbeta_diff_0_25 %>%
+  mutate(
+     n_Nuclei_no_MT = n_Nuclei - n_MT,                      # For Diff index 
+     
+     Diff_arcsine = asin(sqrt(Diff.Index / 100)) # Arcsine transformation for ANOVA tests of % data
+     )
+```
+
+```{r}
+# Logistic regression with MT nuclei as success and nuclei outside MT as failure
+
+fit_tgfbeta_diff_0_25 <- glm(
+  cbind(n_MT, n_Nuclei_no_MT) ~ Condition,
+  family = binomial,         
+  data   = tgfbeta_diff_0_25
+)
+
+
+anova_tgfbeta_diff_0_25 <- anova(fit_tgfbeta_diff_0_25, test = "LRT") 
+
+# Get the estimated Diff.index per Condition & Tukey's all vs all contrasts
+emm_tgfbeta_diff_0_25  <- emmeans(fit_tgfbeta_diff_0_25, "Condition", 
+                             type = "response")       
+
+
+pairs_tgfbeta_diff_0_25 <- pairs(emm_tgfbeta_diff_0_25, 
+                              adjust = "tukey")
+```
+
+
+```{r}
+# Results
+anova_tgfbeta_diff_0_25
+emm_tgfbeta_diff_0_25
+pairs_tgfbeta_diff_0_25
+```
+
+
+
+
+
+# 4J Proliferation 10%FCS
 ```{r}
 tgfbeta_diff <- tgfbeta_diff %>%
   mutate(
@@ -250,7 +297,37 @@ tgfbeta_diff <- tgfbeta_diff %>%
   relocate("Condition", .after = 1)
 ```
 
-# 4I
+```{r}
+# Logistic regression with EdU+ nuclei as success and EdU- nuclei outside MT as failure
+
+
+fit_tgfbeta_diff_pro <- glm(
+  cbind(n_EdU_outside_MT, n_noEdu_noMT) ~ Condition,   
+  family = binomial,         
+  data   = tgfbeta_diff
+)
+
+anova_tgfbeta_diff_pro <- anova(fit_tgfbeta_diff_pro, test = "LRT")
+emm_tgfbeta_diff_pro  <- emmeans(fit_tgfbeta_diff_pro, "Condition", type = "response")      
+
+
+# Restrict contrasts, excluding 0.25%FCS group
+pairs_tgfbeta_diff_pro <- pairs(emm_tgfbeta_diff_pro, 
+                              exclude = c("0.25%FCS"),
+                              adjust = "tukey")
+```
+
+```{r}
+# Results
+anova_tgfbeta_diff_pro
+emm_tgfbeta_diff_pro
+pairs_tgfbeta_diff_pro
+```
+
+
+
+
+# Differentiation index TFGBi + 10%FCS
 ```{r}
 # Logistic regression with MT nuclei as success and nuclei outside MT as failure
 
@@ -280,35 +357,6 @@ pairs_tgfbeta_diff <- pairs(emm_tgfbeta_diff,
 anova_tgfbeta_diff
 emm_tgfbeta_diff
 pairs_tgfbeta_diff
-```
-
-
-
-# 4J
-```{r}
-# Logistic regression with EdU+ nuclei as success and EdU- nuclei outside MT as failure
-
-fit_tgfbeta_diff_pro <- glm(
-  cbind(n_EdU_outside_MT, n_noEdu_noMT) ~ Condition,   
-  family = binomial,         
-  data   = tgfbeta_diff
-)
-
-anova_tgfbeta_diff_pro <- anova(fit_tgfbeta_diff_pro, test = "LRT")
-emm_tgfbeta_diff_pro  <- emmeans(fit_tgfbeta_diff_pro, "Condition", type = "response")      
-
-
-# Restrict contrasts, excluding 0.25%FCS group
-pairs_tgfbeta_diff_pro <- pairs(emm_tgfbeta_diff_pro, 
-                              exclude = c("0.25%FCS"),
-                              adjust = "tukey")
-```
-
-```{r}
-# Results
-anova_tgfbeta_diff_pro
-emm_tgfbeta_diff_pro
-pairs_tgfbeta_diff_pro
 ```
 
 
