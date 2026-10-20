@@ -24,6 +24,7 @@ renv/staging/
 !/Nvir_Annotations/nvir_annotation.Rmd
 !/Nvir_Annotations/Nvir_mitochondrial_genes_Amex_Genes.tabular
 !/Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nvi.eg.db_create.Rmd
+!/Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nviridescens.eg.db_0.1.tar.xz
 
 # A1 single-cell data (Fig. 1A-C, Supp. Figs. 1, 2A)
 !/A1_single_cell_data/notebooks/a1_preprocessing.Rmd

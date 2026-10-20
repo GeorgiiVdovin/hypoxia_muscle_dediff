@@ -66,7 +66,9 @@ single-cell data used in Fig. 6E.
 
 `Nvir_Annotations` - annotation of the Del-Tsonis transcriptome (Tsissios et al., 2024): mitochondrial genes for
 single-cell QC, blastp annotation against Swiss-Prot with GO terms, and the org.Nvi.eg.db package for clusterProfiler, as
-used in this study. A newer annotation of the same transcriptome is available as the org.Nv.eg.db package
+used in this study. The built package is included, so it does not have to be rebuilt:
+`install.packages("Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nviridescens.eg.db_0.1.tar.xz", repos = NULL, type = "source")`.
+A newer annotation of the same transcriptome is available as the org.Nv.eg.db package
 ([github.com/GeorgiiVdovin/org.Nv.eg.db](https://github.com/GeorgiiVdovin/org.Nv.eg.db)).
 
 `tx2gene_katia` - transcript to gene mapping for tximport, also used for org.Nvi.eg.db.
