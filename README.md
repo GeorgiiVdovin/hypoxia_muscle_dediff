@@ -64,7 +64,7 @@ are summed over the peaks called in all four libraries. It writes the myogenic n
 `in_vivo_newt_regeneration` - download, quantification (kallisto) and processing of the N. viridescens blastema
 single-cell data used in Fig. 6E.
 
-`Nvir_Annotations` - annotation of the Del-Tsonis transcriptome (Tsissios et al., 2023): mitochondrial genes for
+`Nvir_Annotations` - annotation of the Del-Tsonis transcriptome (Tsissios et al., 2024): mitochondrial genes for
 single-cell QC, blastp annotation against Swiss-Prot with GO terms, and the org.Nvi.eg.db package for clusterProfiler, as
 used in this study. A newer annotation of the same transcriptome is available as the org.Nv.eg.db package
 ([github.com/GeorgiiVdovin/org.Nv.eg.db](https://github.com/GeorgiiVdovin/org.Nv.eg.db)).
