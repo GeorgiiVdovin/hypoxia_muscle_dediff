@@ -23,8 +23,6 @@ Raw sequencing data, quantification files and the Del-Tsonis transcriptome annot
 | Fig. 6B | `figure6/figure6.Rmd`, data from `in_vivo_mouse_muscle_development/dossantos_multiome.Rmd` | `figure6/plots/B_mouse_development.png` |
 | Fig. 6E | `figure6/figure6.Rmd`, data from `in_vivo_newt_regeneration/notophthalmus_sc.Rmd` | `figure6/plots/E_blastema_dotplot.png` |
 
-Not code: Prism plots (Fig. 2A, B, E, 4G-I, 5F-H), IPA networks (Fig. 4A, B), metabolic assays (Fig. 3D, H),
-microscopy (Fig. 5I, J) and the model (Fig. 6F).
 
 ## Folders and notebooks
 

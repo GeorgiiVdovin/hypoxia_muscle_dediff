@@ -2,6 +2,3 @@
 # and keep any rendered notebooks out of it
 *.Rmd linguist-detectable
 *.html linguist-generated
-
-# Shell scripts run in WSL: keep LF line endings in every checkout
-*.sh text eol=lf

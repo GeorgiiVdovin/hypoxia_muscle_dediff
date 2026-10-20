@@ -60,5 +60,3 @@ renv/staging/
 !/revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3/GSE148667_metadata.csv
 !/in_vivo_mouse_muscle_development/dossantos_multiome.Rmd
 !/in_vivo_newt_regeneration/notophthalmus_sc.Rmd
-!/in_vivo_newt_regeneration/notophthalmus_sc_download.sh
-!/in_vivo_newt_regeneration/notophthalmus_sc_quant.sh

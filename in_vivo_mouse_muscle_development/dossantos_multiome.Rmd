@@ -219,8 +219,7 @@ seu[["chromvar"]] <- CreateAssayObject(data = chromVAR::deviationScores(dev)) # 
 # Myogenic nuclei
 
 ```{r myogenic}
-# Fig. 6B UMAP: MuSCs, myoblasts and myonuclei, with the neighbours of lsi and integratedLSI found again within them (more
-# neighbours for a smoother path), mirrored on x so that the stages run left to right
+# Fig. 6B UMAP: MuSCs, myoblasts and myonuclei, with the neighbours of lsi and integratedLSI 
 myogenic <- subset(seu, subset = cell_type %in% c("MuSCs", "Myoblasts", "Myonuclei"))
 myogenic <- FindMultiModalNeighbors(myogenic, reduction.list = list("lsi", "integratedLSI"), dims.list = list(1:30, 2:30), k.nn = 50)
 myogenic <- RunUMAP(myogenic, nn.name = "weighted.nn", reduction.name = "myogenic.umap", min.dist = 0.3, seed.use = 42)

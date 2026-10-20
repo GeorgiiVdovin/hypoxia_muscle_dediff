@@ -60,8 +60,7 @@ dim(seu) # 15,619 genes, 766 cells (2 of the 768 runs are corrupted on ENA)
 ```{r qc}
 # Paper QC on ERCC spike-ins, no gene-number filter. The paper kept cells with > 10 detected ERCCs after STAR (739 of 768:
 # 376 Hecto, 363 Kilo). kallisto's exact k-mer matching detects fewer spike-ins per cell, and > 5 removes the same failed
-# wells (median 4 ERCC reads) and keeps nearly as many cells (742: 379 Hecto, 363 Kilo); > 10 would also drop 61 Hectoscripts
-# and 10 Kiloscripts
+# wells (median 4 ERCC reads) and keeps almost as many cells (742: 379 Hecto, 363 Kilo)
 ercc <- readMM(file.path(data_dir, "ercc.mtx")) # cells x ERCCs
 n_ercc <- setNames(rowSums(ercc > 0), readLines(file.path(data_dir, "ercc.cells")))
 
@@ -73,7 +72,7 @@ ncol(seu) # 742 cells
 ```
 
 ```{r populations}
-# Detected genes are bimodal: Kiloscripts (paper ~4,600 genes) and Hectoscripts (~540 genes, MKNK2-high), split at the trough
+# Detected genes are bimodal: Kiloscripts (paper ~4,600 genes) and Hectoscripts (~540 genes, MKNK2-high)
 genes_histogram <- ggplot(seu@meta.data, aes(nFeature_RNA)) +
   geom_histogram(bins = 50) +
   geom_vline(xintercept = 1500, linetype = "dashed", color = "red") +
