@@ -6,6 +6,10 @@ editor_options:
 ---
 
 ```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
 suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 })
@@ -21,7 +25,7 @@ mapply(conflict_prefer, c("rename", "select", "filter", "slice"), "dplyr")
 # Blast hits obtained by blastp against swissprot with Galaxy.eu
 library(data.table)
 
-blastp_og_katia <- fread("blastp_Nvir_protein_vs_swissprot_Katia_TransDecoder.tabular")
+blastp_og_katia <- fread("Nvir_Annotations/blastp_Nvir_protein_vs_swissprot_Katia_TransDecoder.tabular")
 
 colnames(blastp_og_katia) <- c("query", "hit", "pident", "evalue", "aling_length", "bitscore", "sacc", "stitle")
 
@@ -146,7 +150,7 @@ blastp_katia <- blastp_katia %>%
 
 library(data.table)
 
-interpro_katia <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Katia_Reference/NVir_Transcriptome_Annotation.txt")
+interpro_katia <- fread("Katia_Reference_OG/NVir_Transcriptome_Annotation.txt")
 
 interpro_katia <- interpro_katia %>%
   rename(txid = SeqName) %>%
@@ -233,13 +237,13 @@ annotations_tx <- annotations_tx %>%
 ```
 
 ```{r}
-write.csv(annotations_tx, file = "Nvir_annotations_tx_level.csv", row.names = FALSE)
+write.csv(annotations_tx, file = "Nvir_Annotations/Nvir_annotations_tx_level.csv", row.names = FALSE)
 ```
 
 
 #tx2gene
 ```{r}
-tx2gene <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/tx2gene_katia/tx2gene_nvir_katia.csv")
+tx2gene <- read.csv("tx2gene_katia/tx2gene_nvir_katia.csv")
 ```
 
 ```{r}
@@ -308,7 +312,7 @@ annotations_final <- annotations_tx %>%
 
 
 ```{r}
-write.csv(annotations_final, file = "Nvir_annotations_MT_Katia_final.csv", row.names = FALSE)
+write.csv(annotations_final, file = "Nvir_Annotations/Nvir_annotations_MT_Katia_final.csv", row.names = FALSE)
 ```
 
 

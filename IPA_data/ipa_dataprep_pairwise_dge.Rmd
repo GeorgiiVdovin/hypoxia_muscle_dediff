@@ -6,6 +6,10 @@ editor_options:
 ---
 
 ```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
 suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
     install.packtimepoints("BiocManager")
 })
@@ -22,10 +26,10 @@ library(org.Nviridescens.eg.db)
 ```{r}
 # Load in annotations
 
-annotations_combined <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Combined Annotations Nvir/Nvir_annotations_combined.csv", header = TRUE)
+annotations_combined <- fread("Combined_Annotations_Nvir/Nvir_annotations_combined.csv", header = TRUE)
 
 # Katia annotations
-annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+annotations <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
 
 head(annotations)
 ```
@@ -34,7 +38,7 @@ head(annotations)
 ```{r}
 # Read in salmon abundance files
 
-dir <- "C:/Users/gevd910d/Desktop/A1 Analysis/salmon_MT_Katia_reference"
+dir <- "salmon_MT_Katia_reference"
 
 #list.files(dir)
 ```
@@ -143,7 +147,7 @@ results_1_IPA <- results_1_IPA %>%
 results_1_IPA$Uniprot <- results_1_IPA$stitle_SP
 
 
-write.csv(results_1_IPA, file = "IPA Results All vs 0h.csv", row.names = FALSE)
+write.csv(results_1_IPA, file = "IPA_data/IPA Results All vs 0h.csv", row.names = FALSE)
 ```
 
 ```{r}
@@ -160,7 +164,7 @@ results_diff <- results_diff %>%
 results_diff$Uniprot <- results_diff$stitle_SP
 
 
-write.csv(results_diff, file = "IPA Results Differentiation Myotubes.csv", row.names = FALSE)
+write.csv(results_diff, file = "IPA_data/IPA Results Differentiation Myotubes.csv", row.names = FALSE)
 ```
 
 
@@ -366,7 +370,7 @@ results_2_IPA <- results_2_IPA %>%
 results_2_IPA$Uniprot <- results_2_IPA$stitle_SP
 
 
-write.csv(results_2_IPA, file = "IPA Results Sequential Comparisons Myotubes.csv", row.names = FALSE)
+write.csv(results_2_IPA, file = "IPA_data/IPA Results Sequential Comparisons Myotubes.csv", row.names = FALSE)
 ```
 
 
@@ -433,13 +437,13 @@ results_dediff_IPA <- results_dediff_IPA %>%
 results_dediff_IPA$Uniprot <- results_dediff_IPA$stitle_SP
 
 
-write.csv(results_dediff_IPA, file = "IPA Results Dediff.csv", row.names = FALSE)
+write.csv(results_dediff_IPA, file = "IPA_data/IPA Results Dediff.csv", row.names = FALSE)
 ```
 
 
 # 4 Diff/Dediff
 ```{r}
-results_diff_only <- read.csv(file = "IPA Results Diff Only.csv")
+results_diff_only <- read.csv(file = "IPA_data/IPA Results Diff Only.csv")
 
 
 
@@ -447,7 +451,7 @@ results_diff_only <- read.csv(file = "IPA Results Diff Only.csv")
 results_4_IPA <- results_diff_only %>%
   left_join(results_dediff_IPA, by = "GENEID")
 
-write.csv(results_4_IPA, file = "IPA Results Diff (vs 0h) Dediff (vs 5d).csv", row.names = FALSE)
+write.csv(results_4_IPA, file = "IPA_data/IPA Results Diff (vs 0h) Dediff (vs 5d).csv", row.names = FALSE)
 ```
 
 

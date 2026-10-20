@@ -6,201 +6,107 @@ editor_options:
 ---
 
 ```{r setup}
-suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
-    install.packages("BiocManager")
-})
+# This notebook works in its own folder: the IPA exports are read from it and the plots are saved into it
+project_root <- rprojroot::find_rstudio_root_file()
+dir <- file.path(project_root, "IPA_data/IPA_LFC_0.5_p_0.001_plots")
+knitr::opts_knit$set(root.dir = dir)
+setwd(dir)
 
-pacman::p_load(data.table, tidyverse, BiocManager, pheatmap, RColorBrewer, gridExtra, circlize, ComplexHeatmap)
+pacman::p_load(tidyverse, RColorBrewer, circlize, ComplexHeatmap)
 ```
 
 
-#PREPARING DATA
+#Pathway Z-Score Bar Plots
 ```{r}
-# Load in annotations
+# Read the IPA z-scores of the canonical pathways. Each column compares a time point with the previous one,
+# so the values are changes, not levels. IPA "N/A" (z-score not computable) stays missing: no bar
+comparisons <- c("8_vs_0", "72_vs_8", "120_vs_72", "128_vs_120", "144_vs_128", "168_vs_144")
 
-annotations_combined <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Combined Annotations Nvir/Nvir_annotations_combined.csv", header = TRUE)
-
-# Katia annotations
-annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
-
-head(annotations)
-```
-
-
-```{r}
-
-dir <- getwd()
-
-list.files(dir)
-```
-
-```{r}
-ipa_cp_raw <- read.csv(file.path(dir, "Sequential Comparsion LFC 0.5 p 0.001 MT CP.csv"), header = TRUE, check.names = FALSE) 
-
-
-ipa_cp_raw[-1] <- lapply(ipa_cp_raw[-1], function(x) {
-  if (is.character(x)) {
-    as.numeric(as.character(x))
-  } else {
-    x
-  }
-}) 
-
-ipa_cp_raw <- ipa_cp_raw %>%
-  as.matrix() %>%
-  replace(is.na(.), 0)
-```
-
-
-
-```{r}
-# Shorten some names
-
-ipa_cp_raw <- as.data.frame(ipa_cp_raw) %>%
-  mutate(`Canonical Pathways` = case_when(
+ipa_cp_long <- read.csv(file.path(dir, "Sequential Comparsion LFC 0.5 p 0.001 MT CP.csv"), header = TRUE, check.names = FALSE, na.strings = "N/A") %>%
+  mutate(`Canonical Pathways` = case_when( # Shorten some names
     `Canonical Pathways` == "The citric acid (TCA) cycle and respiratory electron transport" ~ "TCA & Respiratory Electron Chain",
     `Canonical Pathways` == "Acetyl-CoA Biosynthesis I (Pyruvate Dehydrogenase Complex)" ~ "Acetyl-CoA Biosynthesis I",
     TRUE ~ `Canonical Pathways`
-  ))
+  )) %>%
+  pivot_longer(cols = -`Canonical Pathways`, names_to = "comparison", values_to = "z") %>%
+  mutate(comparison = factor(comparison, levels = comparisons, labels = gsub("_", " ", comparisons))) # x labels "8 vs 0", ...
+
+# One fixed colour per pathway
+pathway_colors <- c("TGF-β Signaling" = "#D55E00", "Signaling by BMP" = "#0072B2", "p53 Signaling" = "#009E73",
+                    "TCA & Respiratory Electron Chain" = "#E69F00", "Mitochondrial biogenesis" = "#56B4E9",
+                    "Acetyl-CoA Biosynthesis I" = "#CC79A7", "Cellular response to hypoxia" = "#0072B2")
 ```
 
-
-#Pathway Z-Score Plots
 ```{r}
-# Function plotting IPA pathway activity data as a heatmap
+# Function plotting IPA pathway z-scores as bars, one bar per comparison and pathway
+# The black outline keeps a computed z = 0 visible as a line. legend_xy puts the legend inside the panel (NULL = no legend)
+plotPathwayBar <- function(pathways, title, legend_xy = NULL) {
 
-
-plotPathway <- function(pathways, name, height, width) {
-  
-  # Sample data preparation
-  ipa_cp <- as.data.frame(ipa_cp_raw) %>%
+  dat <- ipa_cp_long %>%
     filter(`Canonical Pathways` %in% pathways) %>%
-    column_to_rownames(var = "Canonical Pathways") 
-  
-  # Convert to numeric
-  ipa_cp[] <- lapply(ipa_cp, as.numeric)
-  
-  # Reorder pathways
-  ipa_cp <- ipa_cp[pathways, ]
-  
-  # Set up PNG device
-  png(
-    filename = paste0(name, ".png"),
-    width = width,      
-    height = height,      
-    units = "in",
-    res = 1200       
-  )
-  
-  # Create heatmap
-  ht <- Heatmap(
-    as.matrix(ipa_cp), 
-    name = "Pathway Activity", 
-    col = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100), # Same as in pheatmap
-    column_title = name, 
-    row_title = "IPA Pathways",
-    
-    # Clustering settings
-    cluster_rows = FALSE,
-    cluster_columns = FALSE,
-    show_column_dend = FALSE,
-    
-    # Legend settings
-    show_heatmap_legend = TRUE,
-    heatmap_legend_param = list(
-      title = "Pathway Activity Z-Score",
-      legend_direction = "vertical",
-      legend_height = unit(4, "cm"),
-      title_position = "leftcenter-rot",
-      legend_gap = unit(2, "cm")
-    ),
-    
-    # Size and appearance
-    width = unit(10, "cm"),
-    height = unit(5, "cm"),  # 6
-    row_names_gp = gpar(fontsize = 13),  # 20
-    column_names_gp = gpar(fontsize = 11), # 15
-    
-    
-    # Additional settings
-    column_split = c(rep(1, 3), rep(2, ncol(ipa_cp) - 3)),
-    border = TRUE
-  )
-  
-  # Draw the heatmap with extended padding and legend placement
-  draw(
-    ht, 
-    padding = unit(c(2, 2, 2, 2), "cm"),  # top, right, bottom, left padding
-    heatmap_legend_side = "left"           # Ensure legend is placed on the right side of the heatmap
-  )
-  
-  # Close the PNG device
-  dev.off()
-  
-  # Return the heatmap object invisibly
-  return(invisible(ht))
+    mutate(`Canonical Pathways` = factor(`Canonical Pathways`, levels = pathways))
+
+  ggplot(dat, aes(x = comparison, y = z, fill = `Canonical Pathways`)) +
+    geom_hline(yintercept = 0, color = "grey50") +
+    geom_hline(yintercept = c(-2, 2), linetype = "dotted", color = "grey50") + # IPA threshold |z| >= 2
+    geom_vline(xintercept = 3.5, linetype = "dashed", color = "red", linewidth = 1) + # Dediff induction at 120h
+    geom_col(position = position_dodge(width = 0.8, preserve = "single"), width = 0.75,
+             colour = "black", linewidth = 0.3, na.rm = TRUE) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(limits = c(-3, 4)) +
+    scale_fill_manual(values = pathway_colors) +
+    labs(title = title, x = "Comparison (hours)", y = "Activation z-score", fill = NULL) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(color = "darkblue", size = 20, face = "bold", hjust = 0.5),
+      axis.title.x = element_text(color = "darkblue", size = 18, face = "bold"),
+      axis.title.y = element_text(color = "darkblue", size = 18, face = "bold"),
+      axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 14),
+      legend.text = element_text(size = 14),
+      legend.position = if (is.null(legend_xy)) "none" else "inside",
+      legend.position.inside = legend_xy,
+      legend.justification = legend_xy,
+      legend.background = element_rect(fill = "white", colour = NA),
+      panel.grid.major.x = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5)
+    )
 }
 ```
 
 ```{r}
-tp53 <- c(
-  
-  'p53 Signaling'
-              
-              )
+# Fig. 3A: TGF-β, BMP and p53 signalling. 3A and 3B are 8 x 5.5 in, the two ~100 mm panels of the Fig. 3 top row
+tgfb_bmp_p53_bar <- plotPathwayBar(pathways = c("TGF-β Signaling", "Signaling by BMP", "p53 Signaling"),
+                                   title = "TGF-β, BMP and p53",
+                                   legend_xy = c(0.01, 0.99)) # Top left
 
+tgfb_bmp_p53_bar
 
-tgfbeta <- c(
-  
-  'TGF-β Signaling'
-          
-              )
-
-
-bmp <- c(
-  
-  'Signaling by BMP'
-  
-)
-
-
-
-
-
-hypoxia <- c(
-  
-  'Cellular response to hypoxia'
-  
-)
-
-
-
-tca_oxphos <- c(
-  
-  'TCA & Respiratory Electron Chain',
-  'Mitochondrial biogenesis',
-  'Acetyl-CoA Biosynthesis I'
-  
-)
+ggsave(filename = "TGF-β, BMP and p53 bar.png", plot = tgfb_bmp_p53_bar, width = 8, height = 5.5, units = "in", dpi = 1200, bg = "white")
 ```
-
 
 ```{r}
-plotPathway(tgfbeta, "TGF-β", height = 4, width = 8)
+# Fig. 3B: metabolic pathways. TCA and Acetyl-CoA have a z-score only at 120 vs 72
+metabolic_bar <- plotPathwayBar(pathways = c("TCA & Respiratory Electron Chain", "Mitochondrial biogenesis", "Acetyl-CoA Biosynthesis I"),
+                                title = "Metabolic Changes",
+                                legend_xy = c(0.99, 0.99)) # Top right
 
+metabolic_bar
 
-plotPathway(bmp, "BMP", height = 4, width = 8)
-
-
-plotPathway(tp53, "p53", height = 4, width = 8)
-
-
-plotPathway(tca_oxphos, "Metabolic Changes", 5, 9)
-
-
-plotPathway(hypoxia, "Cellular Response to Hypoxia", height = 4, width = 10)
+ggsave(filename = "Metabolic Changes bar.png", plot = metabolic_bar, width = 8, height = 5.5, units = "in", dpi = 1200, bg = "white")
 ```
 
+```{r}
+# Fig. 5E: cellular response to hypoxia. 6.5 x 2.8 in for the ~84 x 36 mm slot under the HIF2A panel (5D),
+# so no x-axis title and horizontal comparison labels
+hypoxia_bar <- plotPathwayBar(pathways = "Cellular response to hypoxia", title = "Cellular Response to Hypoxia") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(size = 13, angle = 0, hjust = 0.5))
+
+hypoxia_bar
+
+ggsave(filename = "Cellular Response to Hypoxia bar.png", plot = hypoxia_bar, width = 6.5, height = 2.8, units = "in", dpi = 1200, bg = "white")
+```
 
 
 #Upstream Regulators Z-Score Plots
@@ -226,10 +132,6 @@ ipa_ur <- ipa_ur[, colnames(ipa_ur) != "Upstream Regulators"]
 # Ensure it's a matrix
 ipa_ur <- as.matrix(ipa_ur)
 ```
-
-
-
-
 
 ```{r}
 plotRegulator <- function(name, cellwidth, cellheight, height, width) {
@@ -311,7 +213,6 @@ plotRegulator <- function(name, cellwidth, cellheight, height, width) {
 }
 ```
 
-
 ```{r}
 plotRegulator("Top 20 IPA Upstream Regulators", 
               cellwidth = 12, cellheight = 20, 
@@ -323,4 +224,3 @@ plotRegulator("Top 20 IPA Upstream Regulators",
 ```{r}
 sessionInfo()
 ```
-

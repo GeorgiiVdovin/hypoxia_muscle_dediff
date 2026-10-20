@@ -6,6 +6,10 @@ editor_options:
 ---
 
 ```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
 suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 })
@@ -20,7 +24,7 @@ pacman::p_load(tidyverse, BiocManager, readr, readxl, UniProt.ws, seqinr, data.f
 
 #tx2gene Mapping
 ```{r}
-annotations_og <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir Annotation SYMBOLS + org.Nvir/Nvir Latest Annotation Katia/Nvir_annotations_tx_level.csv")
+annotations_og <- fread("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_tx_level.csv")
 ```
 
 
@@ -87,7 +91,7 @@ tx2gene %>% summarise(unique_count = n_distinct(GENEID))
 
 
 ```{r}
-write.csv(tx2gene, file = "tx2gene_nvir_katia.csv", row.names = FALSE)
+write.csv(tx2gene, file = "tx2gene_katia/tx2gene_nvir_katia.csv", row.names = FALSE)
 ```
 
 

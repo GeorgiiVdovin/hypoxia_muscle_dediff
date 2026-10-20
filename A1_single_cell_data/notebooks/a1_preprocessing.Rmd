@@ -1,0 +1,293 @@
+---
+title: "A1 SC Preprocessing"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+options(Seurat.object.assay.version = "v5")
+
+pacman::p_load(Seurat, data.table, tidyverse, hdf5r)
+```
+
+
+#Gene Counts
+```{r}
+# Read in the cellranger counts, transcripts in rows and cells in columns
+tx_counts <- Read10X_h5("A1_single_cell_data/raw_data/a1_filtered_feature_bc_matrix.h5") %>%
+  as.data.frame()
+
+dim(tx_counts) # 153,364 transcripts, 2,528 sequenced cells
+
+# Transcript to gene map
+tx2gene <- read.csv("tx2gene_katia/tx2gene_nvir_katia.csv")
+```
+
+
+```{r}
+# Summarize tx to genes. The dense table takes ~4 min and ~10 GB RAM
+tx_counts <- tx_counts %>%
+  rownames_to_column(var = "TXNAME") %>%
+  left_join(tx2gene, by = "TXNAME")
+
+setDT(tx_counts)
+gene_counts <- tx_counts[, lapply(.SD, sum), by = GENEID, .SDcols = is.numeric] # Dplyr takes too long, this is more efficient
+setkey(gene_counts, GENEID)
+
+nrow(gene_counts) # 139,019 genes, before merging by symbol
+```
+
+
+```{r}
+# Load in annotations
+annotations <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE) %>%
+  mutate(SYMBOL = ifelse(GENEID == "g.345663", "ACTA2.1", SYMBOL)) %>% # Smooth muscle actin was labeled with a protein name ACTS
+  mutate(SYMBOL = ifelse(grepl("^g\\.", SYMBOL), SYMBOL, str_to_sentence(str_remove(SYMBOL, "\\.[0-9]+$"))), # Tmp, Tmp.1, Tmp.2 are copies of one gene and become Tmp. Unannotated g. genes keep their ID
+         SYMBOL = gsub("_", "-", SYMBOL)) # Seurat swaps "_" for "-" in gene names
+
+gene2symbol <- annotations %>%
+  select(SYMBOL, GENEID) %>%
+  distinct(GENEID, .keep_all = TRUE)
+```
+
+
+```{r}
+# Annotated cell / counts matrix. Genes with the same symbol are summed up
+gene_counts <- gene_counts %>%
+  left_join(gene2symbol, by = "GENEID") %>%
+  select(-GENEID)
+
+setDT(gene_counts)
+gene_counts <- gene_counts[, lapply(.SD, sum), by = SYMBOL]
+
+gene_counts <- gene_counts %>%
+  column_to_rownames(var = "SYMBOL")
+
+nrow(gene_counts) # 83,679 genes
+sum(!grepl("^g\\.", rownames(gene_counts))) # 15,072 of them with a symbol, the rest are unannotated g. genes
+```
+
+
+```{r}
+# Seurat object
+seu <- CreateSeuratObject(counts = gene_counts,
+                          project = "A1_Cells",
+                          min.cells = 3,
+                          min.features = 200)
+
+seu # 23,818 genes
+```
+
+
+#Filtering
+```{r}
+# QC metrics
+
+# Mitochondrial genes. The mitochondrial transcripts are unannotated g. contigs, found by their InterPro description. Only MT-Nd5 and MT-TH match by MT- name
+mito_genes <- annotations %>%
+  filter(grepl("^(cytochrome b|cytochrome c oxidase subunit (I|II|III)|NADH dehydrogenase subunit [1-6L]+|ATP synthase F0 subunit [68])$", Description_IP)) %>%
+  pull(SYMBOL) %>%
+  union(grep("^Mt-", rownames(seu), value = TRUE)) %>%
+  intersect(rownames(seu))
+
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, features = mito_genes)
+
+# Mapping rate and mismatches per 100 bp per cell, calculated from the cellranger BAM
+mapping <- read.csv("A1_single_cell_data/raw_data/a1_mapping_per_cell.csv")
+
+seu$percent.mapped <- mapping$percent.mapped[match(colnames(seu), mapping$cell)]
+seu$mismatch.rate <- mapping$mismatch.rate[match(colnames(seu), mapping$cell)]
+```
+
+
+```{r}
+# Dynamic QC thresholds, median +/- 3 MADs on the log scale: genes and UMIs in both directions, mapping rate only downwards
+# Mitochondrial reads have a hard cutoff of 5 %, as 3 MADs allowed up to 17.7 %
+n_mads <- 3
+
+is_outlier <- function(x, type) {
+  lx <- log1p(x)
+  lo <- median(lx) - n_mads * mad(lx) # Lower bound
+  hi <- median(lx) + n_mads * mad(lx) # Higher bound
+  switch(type,
+         both = lx < lo | lx > hi,
+         lower = lx < lo)
+}
+
+qc <- seu@meta.data %>%
+  mutate(out_feature = is_outlier(nFeature_RNA, "both"),
+         out_count = is_outlier(nCount_RNA, "both"),
+         out_mt = percent.mt > 5, # Hard cutoff
+         out_mapped = is_outlier(percent.mapped, "lower"),
+         keep = !out_feature & !out_count & !out_mt & !out_mapped & nFeature_RNA >= 200)
+
+# Cells lost per rule, 2,097 kept
+qc %>%
+  summarise(cells = n(),
+            out_feature = sum(out_feature),
+            out_count = sum(out_count),
+            out_mt = sum(out_mt),
+            out_mapped = sum(out_mapped),
+            kept = sum(keep))
+
+
+# Filtering
+seu$qc_keep <- qc$keep
+
+seu <- subset(seu, subset = qc_keep)
+```
+
+
+#Normalization
+```{r}
+# Normalized values are in seu[["RNA"]]$data
+seu <- NormalizeData(seu) # Log normalization with scale.factor = 10.000 is default
+
+# HVG
+seu <- FindVariableFeatures(seu,
+                            selection.method = "vst",
+                            nfeatures = 2000)
+```
+
+
+#First Clustering
+```{r}
+# Clustered once before the cell cycle regression, to find the cells that are not N. viridescens. Standard pipeline on the variable genes
+seu <- ScaleData(seu, features = VariableFeatures(seu))
+
+seu <- RunPCA(seu, features = VariableFeatures(seu))
+
+set.seed(42)
+seu <- FindNeighbors(seu, dims = 1:20)
+
+set.seed(42)
+seu <- FindClusters(seu, resolution = 1)
+
+
+# Mapping rate and mismatches per cluster, the numbers in the Methods
+seu@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(cells = n(),
+            median_mapped = median(percent.mapped),
+            median_mismatch = median(mismatch.rate),
+            median_mt = median(percent.mt),
+            median_features = median(nFeature_RNA))
+```
+
+
+# Annotation
+```{r}
+# Cluster 6 maps worse, has twice the mismatches and almost no mitochondrial reads: residual P. waltl cells of the multiplexed 10x run
+# The 3 MAD mapping-rate threshold only removes the worst of them, so the cluster is excluded by ID. It keeps the Translation_hi name of the first analysis
+cluster_id_all <- ifelse(levels(seu) == "6", "Translation_hi", "Translation")
+names(cluster_id_all) <- levels(seu)
+
+seu <- RenameIdents(seu, cluster_id_all)
+
+seu$cell_type <- Idents(seu)
+
+
+# Excluded vs kept cells, the numbers in the Methods
+seu@meta.data %>%
+  group_by(cell_type) %>%
+  summarise(cells = n(),
+            median_mapped = median(percent.mapped),
+            median_mismatch = median(mismatch.rate),
+            median_mt = median(percent.mt))
+```
+
+
+```{r}
+# Clean object, N. viridescens cells only
+a1_clean <- subset(seu, subset = cell_type == "Translation")
+
+a1_clean # 1,912 cells
+```
+
+
+#Cell-cycle regression
+```{r}
+# Reprocessing from the clean cells. Variable genes and scaling are redone on them
+a1_clean <- NormalizeData(a1_clean)
+
+a1_clean <- FindVariableFeatures(a1_clean,
+                                 selection.method = "vst",
+                                 nfeatures = 2000)
+
+
+# CC genes: the Seurat S and G2M lists, matched to the newt symbols without their -a/-b suffixes
+cell_cycle <- data.frame(SYMBOL = rownames(a1_clean)) %>%
+  mutate(SYMBOL_cc = str_to_upper(str_remove(SYMBOL, "-.*")))
+
+s.genes <- cell_cycle %>%
+  filter(SYMBOL_cc %in% cc.genes.updated.2019$s.genes) %>%
+  pull(SYMBOL)
+
+g2m.genes <- cell_cycle %>%
+  filter(SYMBOL_cc %in% cc.genes.updated.2019$g2m.genes) %>%
+  pull(SYMBOL)
+
+
+# Assign each cell a score, based on its expression of G2/M and S phase markers
+a1_clean <- CellCycleScoring(a1_clean,
+                             s.features = s.genes,
+                             g2m.features = g2m.genes,
+                             set.ident = TRUE)
+
+# Regressing out the CC scores while scaling all genes. Results are in a1_clean[["RNA"]]$scale.data
+a1_clean <- ScaleData(a1_clean,
+                      vars.to.regress = c("S.Score", "G2M.Score"),
+                      features = rownames(a1_clean))
+```
+
+
+#Clustering
+```{r}
+# Linear dimensional reduction on the variable genes after CC regression
+a1_clean <- RunPCA(a1_clean,
+                   features = VariableFeatures(object = a1_clean))
+
+set.seed(42)
+a1_clean <- FindNeighbors(a1_clean,
+                          dims = 1:15) # Which PC's to take as input
+
+set.seed(42)
+a1_clean <- FindClusters(a1_clean, resolution = 0.5) # At 1 the 7 clusters were pairwise very similar, 0.5 gives 4
+```
+
+
+# Cluster names
+```{r}
+# All express Acta2, Tagln and Vim
+cluster_names <- c("0" = "TE-high",         # Retrotransposon-derived genes (Peg10, Gag, Pol, Ty3b, Tf2)
+                   "2" = "ECM-high",        # Matrix genes (Mgp, Mmp13, Mmp14, Tgfbi) and the TGF-b feedback inhibitors Bambi and Pmepa1
+                   "1" = "G2M-high",        # Most G2/M cells (38%), proliferation genes (Ube2c, Cdc20, Kpna2, H2ax, H4)
+                   "3" = "G1/OxPhos-high")  # Cells enriched in G1 (59%), respiratory chain (Ndufs6, Cox5a, Uqcrb) and ribosomal genes up most strongly, fewest mitochondrial reads
+
+name_per_cell <- unname(cluster_names[as.character(a1_clean$seurat_clusters)]) # Without names, or Seurat matches them to the cell names
+a1_clean$cluster_name <- factor(name_per_cell, levels = cluster_names)
+
+Idents(a1_clean) <- "cluster_name" # seurat_clusters keeps the IDs
+
+table(a1_clean$cluster_name, a1_clean$seurat_clusters) # Cluster sizes
+```
+
+
+#UMAP
+```{r}
+set.seed(42)
+a1_clean <- RunUMAP(a1_clean, dims = 1:15)
+
+saveRDS(a1_clean, file = "A1_single_cell_data/objects/a1_clean.rds")
+```
+
+
+#END
+```{r}
+sessionInfo()
+```

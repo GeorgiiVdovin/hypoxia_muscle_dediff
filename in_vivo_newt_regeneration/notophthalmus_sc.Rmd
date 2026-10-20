@@ -1,0 +1,162 @@
+---
+title: "In vivo newt regeneration - Notophthalmus limb blastema single-cell"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+# To add a new package: renv::install("packageName") or renv::install("bioc::packageName"), then renv::snapshot(). Snapshots are always run in the console
+
+pacman::p_load(Seurat, data.table, tidyverse, Matrix)
+
+# Fig. 6C: adult N. viridescens limb blastema at 18 dpa, Smart-seq2 (Subramanian et al. 2023, PRJNA904299), downloaded with
+# notophthalmus_sc_download.sh and quantified with kallisto against the Katia transcriptome of the A1 bulk data
+# (notophthalmus_sc_quant.sh). Processed as in the paper: one gene per symbol, ERCC QC, and the Kiloscript / Hectoscript
+# split by detected genes. The saved object is read by figure6/figure6.Rmd
+data_dir <- "in_vivo_newt_regeneration/data/notophthalmus_sc"
+res_dir  <- "in_vivo_newt_regeneration/results/notophthalmus_sc"
+```
+
+
+# Preparing Data
+
+```{r counts}
+# kb count gene matrix: cells in rows, Katia GENEIDs in columns, turned to genes x cells
+counts <- readMM(file.path(data_dir, "matrix.abundance.gene.mtx")) %>%
+  t() %>%
+  as("CsparseMatrix")
+
+rownames(counts) <- readLines(file.path(data_dir, "genes.txt"))
+colnames(counts) <- readLines(file.path(data_dir, "matrix.cells"))
+
+# Katia annotation, one row per GENEID (the isoform with the most GO terms), same as A1_diff_dediff.Rmd
+annotations <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
+annotations$X.GO_IP[is.na(annotations$X.GO_IP)] <- 0
+
+setDT(annotations)
+annotations_gid <- annotations[, .SD[which.max(X.GO_IP)], by = GENEID]
+
+# One gene per symbol, as in the paper: numbered copies and case variants of a symbol (HIF3A, HIF3A.1, Hif3a) are
+# summed, unannotated GENEIDs (SYMBOL = g.*) are dropped
+annotations_gid <- annotations_gid %>%
+  mutate(gene = ifelse(grepl("^g\\.", SYMBOL), NA, toupper(sub("\\.[0-9]+$", "", SYMBOL))))
+
+gene <- annotations_gid$gene[match(rownames(counts), annotations_gid$GENEID)]
+
+# fac2sparse() makes a 0/1 genes x GENEIDs matrix, so the product sums the GENEIDs of each gene
+counts <- fac2sparse(factor(gene[!is.na(gene)])) %*% counts[!is.na(gene), ]
+
+seu <- CreateSeuratObject(counts = round(counts), project = "blastema_18dpa") # kallisto counts are estimates
+
+dim(seu) # 15,619 genes, 766 cells (2 of the 768 runs are corrupted on ENA)
+```
+
+```{r qc}
+# Paper QC on ERCC spike-ins, no gene-number filter. The paper kept cells with > 10 detected ERCCs after STAR (739 of 768:
+# 376 Hecto, 363 Kilo). kallisto's exact k-mer matching detects fewer spike-ins per cell, and > 5 removes the same failed
+# wells (median 4 ERCC reads) and keeps nearly as many cells (742: 379 Hecto, 363 Kilo); > 10 would also drop 61 Hectoscripts
+# and 10 Kiloscripts
+ercc <- readMM(file.path(data_dir, "ercc.mtx")) # cells x ERCCs
+n_ercc <- setNames(rowSums(ercc > 0), readLines(file.path(data_dir, "ercc.cells")))
+
+seu$ercc_detected <- replace_na(unname(n_ercc[colnames(seu)]), 0) # 0 for cells without any ERCC read
+
+seu <- subset(seu, subset = ercc_detected > 5)
+
+ncol(seu) # 742 cells
+```
+
+```{r populations}
+# Detected genes are bimodal: Kiloscripts (paper ~4,600 genes) and Hectoscripts (~540 genes, MKNK2-high), split at the trough
+genes_histogram <- ggplot(seu@meta.data, aes(nFeature_RNA)) +
+  geom_histogram(bins = 50) +
+  geom_vline(xintercept = 1500, linetype = "dashed", color = "red") +
+  scale_x_log10() +
+  labs(x = "Detected genes per cell", y = "Cells") +
+  theme_minimal()
+
+genes_histogram
+
+ggsave(filename = file.path(res_dir, "detected_genes.png"), plot = genes_histogram, width = 6, height = 4, dpi = 600, bg = "white")
+
+seu$population <- ifelse(seu$nFeature_RNA > 1500, "Kiloscript", "Hectoscript")
+
+table(seu$population) # 379 Hectoscripts, 363 Kiloscripts
+```
+
+```{r clustering}
+# Log-normalised, 2,000 variable genes, 15 PCs, resolution 0.5
+seu <- NormalizeData(seu)
+
+seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+
+seu <- ScaleData(seu)
+
+seu <- RunPCA(seu, features = VariableFeatures(seu))
+
+seu <- FindNeighbors(seu, dims = 1:15)
+seu <- FindClusters(seu, resolution = 0.5)
+seu <- RunUMAP(seu, dims = 1:15)
+```
+
+
+# Cell types
+
+```{r markers}
+# Marker genes per cluster, behind the cell types below. Myf5 / Myog / Myod1 are not in the Katia reference, Pax7 has no reads
+cell_markers <- list(
+  muscle      = c("DES", "ACTA1", "TNNT1", "MYH2", "PAX7"),
+  mesenchyme  = c("PRRX1", "COL1A1", "TWIST1", "LUM"),
+  epidermis   = c("KRT5", "KRT17", "EPCAM"),
+  immune      = c("PTPRC", "CD74"),
+  endothelial = c("PECAM1", "KDR"),
+  blood       = c("HBA1", "HBB1"),
+  cycling     = c("MKI67", "TOP2A"),
+  hectoscript = c("MKNK2")
+)
+
+marker_dotplot <- DotPlot(seu, features = lapply(cell_markers, function(genes) intersect(genes, rownames(seu))), cluster.idents = TRUE) +
+  RotatedAxis() +
+  theme(axis.text.x = element_text(size = 9))
+
+marker_dotplot
+
+ggsave(filename = file.path(res_dir, "cell_type_markers.png"), plot = marker_dotplot, width = 14, height = 6, dpi = 600, bg = "white")
+
+# Cells, median detected genes and Hectoscript share per cluster
+seu@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(cells = n(), genes = median(nFeature_RNA), hectoscript = round(mean(population == "Hectoscript"), 2))
+```
+
+```{r cell-types}
+# Fig. 6C: cell type per cluster, from the dot plot, the table above and the top genes per cluster (FindAllMarkers, run
+# outside this notebook)
+cell_types <- c("0" = "Hectoscript", "1" = "mesenchyme", "2" = "epidermis", "3" = "mesenchyme IL11+",
+                "4" = "macrophages", "5" = "chondrogenic", "6" = "erythrocytes")
+
+seu$cell_type <- unname(cell_types[as.character(seu$seurat_clusters)])
+
+umap_cell_types <- DimPlot(seu, group.by = "cell_type")
+
+umap_cell_types
+
+ggsave(filename = file.path(res_dir, "umap_cell_types.png"), plot = umap_cell_types, width = 7, height = 5, dpi = 600, bg = "white")
+```
+
+
+# Save
+
+```{r save}
+# Fig. 6C: figure6/figure6.Rmd keeps the RNA data of the Fig. 6 genes and the population and cell_type columns
+saveRDS(seu, file.path(data_dir, "blastema_18dpa.rds"))
+```
+
+
+# END

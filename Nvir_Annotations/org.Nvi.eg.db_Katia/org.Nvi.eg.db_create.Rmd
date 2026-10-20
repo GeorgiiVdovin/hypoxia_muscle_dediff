@@ -6,6 +6,10 @@ editor_options:
 ---
 
 ```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
 suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 })
@@ -15,7 +19,7 @@ pacman::p_load(tidyverse, BiocManager, readr, readxl, AnnotationForge, Annotatio
 
 ```{r}
 # Read the gzipped text file
-annotations_nvir <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+annotations_nvir <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
 
 head(annotations_nvir)
 
@@ -98,7 +102,7 @@ makeOrgPackage(gene_info = NvirSym,
                version = "0.1",
                maintainer = "Georgii Vdovin <georgii.vdovin@tu-dresden.de>",
                author = "Georgii Vdovin",
-               outputDir = ".",
+               outputDir = "Nvir_Annotations/org.Nvi.eg.db_Katia",
                tax_id = "8316",
                genus = "Notophthalmus",
                species = "viridescens",
@@ -108,7 +112,7 @@ makeOrgPackage(gene_info = NvirSym,
 
 ```{r}
 # Call install.packages based on the return value
-install.packages("./org.Nviridescens.eg.db", 
+install.packages("Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nviridescens.eg.db", 
                  type = "source",
                  repos = NULL)
 

@@ -1,0 +1,64 @@
+# Everything is ignored, except the code behind the figures and the small inputs it reads (listed below).
+# To track a new file, add a "!" line for it.
+*
+!*/
+renv/library/
+renv/staging/
+
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/A1 Analysis.Rproj
+!/.Rprofile
+!/renv.lock
+!/renv/activate.R
+!/renv/settings.json
+
+# Bulk RNA-seq time course (Figs. 2-5, Supp. Figs. 3, 4)
+!/A1_diff_dediff.Rmd
+!/muscle_diff.csv
+!/salmon_MT_Katia_reference/samples.txt
+!/sandberg_reference_realigned_bulk/sandberg_muscle_genes.Rmd
+!/sandberg_reference_realigned_bulk/salmon_MT_quant_Sandberg_reference/samples.txt
+!/tx2gene_katia/tx2gene_nvir_katia.Rmd
+!/Nvir_Annotations/nvir_annotation.Rmd
+!/Nvir_Annotations/Nvir_mitochondrial_genes_Amex_Genes.tabular
+!/Nvir_Annotations/org.Nvi.eg.db_Katia/org.Nvi.eg.db_create.Rmd
+
+# A1 single-cell data (Fig. 1A-C, Supp. Figs. 1, 2A)
+!/A1_single_cell_data/notebooks/a1_preprocessing.Rmd
+!/A1_single_cell_data/notebooks/a1_dge.Rmd
+!/A1_single_cell_data/notebooks/a1_monocle3.Rmd
+!/A1_single_cell_data/raw_data/a1_filtered_feature_bc_matrix.h5
+!/A1_single_cell_data/raw_data/a1_mapping_per_cell.csv
+
+# A1 cell type (Fig. 1D, E, Supp. Fig. 2B-E)
+!/A1_cross_species_comparisons/tx2gene_mouse.csv
+!/A1_cross_species_comparisons/top_tpm_*/*.Rmd
+!/A1_cross_species_comparisons/top_tpm_*/*_SRA*.txt
+/A1_cross_species_comparisons/top_tpm_A1_Sandberg/
+
+# IPA (Figs. 3A, B, 5E, Supp. Fig. 4)
+!/IPA_data/ipa_dataprep_pairwise_dge.Rmd
+!/IPA_data/IPA_LFC_0.5_p_0.001_plots/ipa_z-score_plots.Rmd
+!/IPA_data/IPA_LFC_0.5_p_0.001_plots/Sequential Comparsion LFC 0.5 p 0.001 MT CP.csv
+!/IPA_data/IPA_LFC_0.5_p_0.001_plots/Sequential Comparsion LFC 0.5 p 0.001 MT UR.csv
+
+# Nuclei counts and statistics (Figs. 4G-I, 5F-H, Supplementary Table 2)
+!/logistic_regression/logit_link_myotubes.Rmd
+!/logistic_regression/deblinded_quantified_results/*.csv
+
+# Figure 6 and the in vivo data behind it
+!/figure6/figure6.Rmd
+!/figure6/data/culture_lfc.csv
+!/figure6/data/human_myoblast_lfc.csv
+!/figure6/data/human_nuclei_lfc.csv
+!/figure6/data/mouse_myogenic.rds
+!/figure6/data/mouse_myogenic_motifs.rds
+!/figure6/data/blastema_18dpa_genes.rds
+!/figure6/data/regeneration_lfc.csv
+!/revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3/GSE148667_metadata.csv
+!/in_vivo_mouse_muscle_development/dossantos_multiome.Rmd
+!/in_vivo_newt_regeneration/notophthalmus_sc.Rmd
+!/in_vivo_newt_regeneration/notophthalmus_sc_download.sh
+!/in_vivo_newt_regeneration/notophthalmus_sc_quant.sh

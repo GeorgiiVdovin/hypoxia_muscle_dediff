@@ -1,0 +1,254 @@
+---
+title: "In vivo mouse muscle development - multiome (Dos Santos et al. 2023)"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+# To add a new package: renv::install("packageName") or renv::install("bioc::packageName"), then renv::snapshot(). Snapshots are always run in the console
+
+pacman::p_load(Seurat, Signac, GenomicRanges, JASPAR2024, TFBSTools, BSgenome.Mmusculus.UCSC.mm10, tidyverse, Matrix, patchwork, BiocParallel)
+
+# chromVAR in parallel; Seurat runs sequentially, as each worker would get a 6 GB copy of the data
+register(SnowParam(workers = 4))
+set.seed(1234)
+
+# Mouse hindlimb muscle at E14.5, E18.5, P5 and adult, 10x Multiome (Dos Santos et al. 2023, GSE211543), one library per stage.
+# Processed following the authors' script (github.com/matthieudossantos/Multiome-snRNAseq-and-snATACseq-Muscle-development-atlas-script).
+# Only difference: their fragment files are not deposited, so ATAC counts are the deposited per-library peak counts summed over
+# the merged peaks, instead of fragments counted in them. Only merged peaks called in all four libraries are kept, as the others
+# are zero by construction in the libraries that did not call them, which separates the libraries
+raw_dir  <- "revision/A1_sc_cross_species/mammalian_sc_data/Mouse_Muscle_Development_DosSantos2023"
+data_dir <- "in_vivo_mouse_muscle_development/data"
+res_dir  <- "in_vivo_mouse_muscle_development/results"
+
+samples <- c("E14.5" = "GSM6475260_E14", "E18.5" = "GSM6475261_E18", "P5" = "GSM6475262_P5", "Adult" = "GSM6475263_Adult")
+```
+
+
+# Preparing Data
+
+```{r counts}
+# One library: RNA counts per gene, ATAC counts per peak called in that library, and the peak positions
+read_sample <- function(id, stage) {
+  counts   <- readMM(file.path(raw_dir, paste0(id, "_matrix.mtx.gz")))
+  features <- read.delim(file.path(raw_dir, paste0(id, "_features.tsv.gz")), header = FALSE) # V2 gene or peak, V3 type, V4-V6 position
+  barcodes <- read.delim(file.path(raw_dir, paste0(id, "_barcodes.tsv.gz")), header = FALSE)
+  colnames(counts) <- paste(stage, barcodes$V1, sep = "_")
+
+  genes <- features$V3 == "Gene Expression"
+  rna <- counts[genes, ]
+  rownames(rna) <- make.unique(features$V2[genes])
+
+  peaks <- features$V3 == "Peaks"
+  ranges <- GRanges(seqnames = features$V4[peaks],
+                    ranges = IRanges(start = features$V5[peaks] + 1, end = features$V6[peaks])) # 0-based starts in the file
+
+  list(rna = as(rna, "CsparseMatrix"), atac = counts[peaks, ], ranges = ranges)
+}
+
+data <- Map(read_sample, id = samples, stage = names(samples))
+
+# Merged peaks of the four libraries, 20 bp to 10 kb, standard chromosomes
+merged <- GenomicRanges::reduce(c(data$E14.5$ranges, data$E18.5$ranges, data$P5$ranges, data$Adult$ranges)) # GenomicRanges, not purrr
+merged <- merged[width(merged) > 20 & width(merged) < 10000]
+merged <- GenomeInfoDb::keepStandardChromosomes(merged, species = "Mus_musculus", pruning.mode = "coarse")
+
+# Only merged peaks called in all four libraries
+called_in_all <- overlapsAny(merged, data$E14.5$ranges) & overlapsAny(merged, data$E18.5$ranges) &
+  overlapsAny(merged, data$P5$ranges) & overlapsAny(merged, data$Adult$ranges)
+merged <- merged[called_in_all]
+
+# One Seurat object per library. ATAC: the counts of the library's peaks summed over the merged peak each one overlaps
+objects <- imap(data, function(x, stage) {
+  hits <- findOverlaps(query = x$ranges, subject = merged)
+  peak_to_merged <- sparseMatrix(i = subjectHits(hits), j = queryHits(hits), x = 1,
+                                 dims = c(length(merged), length(x$ranges))) # merged peaks x library peaks, 1 = overlap
+  atac <- peak_to_merged %*% x$atac
+  rownames(atac) <- GRangesToString(merged)
+
+  obj <- CreateSeuratObject(counts = x$rna, project = stage)
+  obj[["ATAC"]] <- CreateChromatinAssay(counts = atac)
+  obj
+})
+
+seu <- merge(objects[[1]], y = objects[-1])
+seu$stage <- factor(seu$orig.ident, levels = names(samples))
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern = "^mt-", assay = "RNA")
+```
+
+
+# QC
+
+```{r qc}
+# Thresholds of the authors' script. TSS enrichment and nucleosome signal would need the fragment files
+seu <- subset(seu, subset = nCount_ATAC < 7e4 & nCount_ATAC > 400 & nCount_RNA < 25000 & nCount_RNA > 400 & percent.mt < 20)
+```
+
+
+# Integration
+
+```{r integration}
+# RNA: SCTransform per library with the mitochondrial reads regressed, RPCA anchors
+DefaultAssay(seu) <- "RNA"
+seu <- JoinLayers(seu)
+
+seu_list <- SplitObject(seu, split.by = "stage")
+seu_list <- lapply(seu_list, function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, nfeatures = 2000)
+  SCTransform(x, method = "glmGamPoi", vars.to.regress = "percent.mt")
+})
+
+anchor_features <- SelectIntegrationFeatures(object.list = seu_list, nfeatures = 3000)
+seu_list <- PrepSCTIntegration(object.list = seu_list, anchor.features = anchor_features)
+seu_list <- lapply(seu_list, RunPCA, features = anchor_features)
+
+anchors <- FindIntegrationAnchors(object.list = seu_list, normalization.method = "SCT", anchor.features = anchor_features,
+                                  dims = 1:30, reduction = "rpca", k.anchor = 20)
+seu <- IntegrateData(anchorset = anchors, normalization.method = "SCT", new.assay.name = "integratedRNA", dims = 1:30)
+
+# ATAC: LSI, then integrated with the same anchors
+DefaultAssay(seu) <- "ATAC"
+seu <- RunTFIDF(seu)
+seu <- FindTopFeatures(seu, min.cutoff = "q25")
+seu <- RunSVD(seu)
+
+# IntegrateEmbeddings returns a whole new object, only its integratedLSI is kept
+seu[["integratedLSI"]] <- IntegrateEmbeddings(anchorset = anchors, reductions = seu[["lsi"]],
+                                              new.reduction.name = "integratedLSI")[["integratedLSI"]]
+
+# Weighted neighbours of lsi and integratedLSI, UMAP and clusters (algorithm 3 = SLM), as in the authors' script
+seu <- FindMultiModalNeighbors(seu, reduction.list = list("lsi", "integratedLSI"), dims.list = list(1:30, 2:30))
+seu <- RunUMAP(seu, nn.name = "weighted.nn", reduction.name = "wnn.umap")
+seu <- FindClusters(seu, graph.name = "wsnn", algorithm = 3)
+
+DimPlot(seu, reduction = "wnn.umap", label = TRUE) + DimPlot(seu, reduction = "wnn.umap", group.by = "stage")
+
+ggsave(file.path(res_dir, "umap_all_nuclei.png"), width = 13, height = 5.5, dpi = 600, bg = "white")
+```
+
+
+# Cell types
+
+```{r normalise}
+# Log-normalised RNA of all libraries together, for the marker plot and the saved RNA
+DefaultAssay(seu) <- "RNA"
+seu <- JoinLayers(seu) # IntegrateData splits the RNA layers by stage again
+seu <- NormalizeData(seu)
+```
+
+```{r cell-types}
+# Clusters named from the marker plot below, with the cell types of the paper
+cell_types <- c("1" = "Myonuclei", "2" = "Myonuclei", "3" = "Myonuclei", "4" = "Myonuclei", "8" = "Myonuclei", "11" = "Myonuclei",
+                "13" = "Myonuclei", "12" = "Myoblasts", "14" = "Myoblasts", "10" = "MuSCs",
+                "0" = "Mesenchymal", "6" = "Mesenchymal", "16" = "Mesenchymal",
+                "5" = "Tenocytes", "7" = "Tenocytes", "17" = "Tenocytes", "21" = "Tenocytes",
+                "9" = "Endothelial", "15" = "Macrophages", "18" = "Smooth muscle", "20" = "Smooth muscle", # 18: pericytes (Rgs5, Pdgfrb)
+                "19" = "Adipocytes")
+
+seu$cell_type <- unname(cell_types[as.character(seu$seurat_clusters)])
+seu$stage <- factor(seu$stage, levels = names(samples)) # integration turns it back into text
+```
+
+```{r markers}
+# Marker genes per cluster, behind the names above: the markers of the paper (Fig. 1c), stage myosins and pericytes (Rgs5, Pdgfrb)
+cluster_labels <- paste0(seu$cell_type, " (", seu$seurat_clusters, ")") # e.g. "Myonuclei (1)"
+label_order <- paste0(cell_types, " (", names(cell_types), ")") # rows in the order of the table, from the top
+seu$label <- factor(cluster_labels, levels = rev(label_order))
+
+marker_genes <- c("Ttn", "Myh3", "Myh8", "Myh4", "Col22a1", "Mymk", "Myog", "Pax7", "Mki67", "Pdgfra", "Tnxb", "Col11a1", "Scx",
+                  "Flt1", "Mrc1", "Myh11", "Rgs5", "Pdgfrb", "Pparg")
+
+marker_plot <- DotPlot(seu, features = marker_genes, group.by = "label") +
+  RotatedAxis() +
+  labs(x = NULL, y = NULL, title = "Markers per WNN cluster (paper Fig. 1c markers + stage myosins)")
+
+marker_plot
+
+ggsave(filename = file.path(res_dir, "cell_type_markers.png"), plot = marker_plot, width = 10, height = 7, dpi = 300, bg = "white")
+
+seu$label <- NULL # only for this plot, the saved objects keep their columns
+```
+
+```{r umap-rna}
+# RNA UMAP of the integrated RNA, as their Fig. 1b, d
+DefaultAssay(seu) <- "integratedRNA"
+seu <- seu %>%
+  ScaleData() %>%
+  RunPCA(npcs = 30) %>%
+  RunUMAP(dims = 1:30, reduction.name = "umap.RNA")
+
+DimPlot(seu, reduction = "umap.RNA", group.by = "cell_type", label = TRUE) + NoLegend() +
+  DimPlot(seu, reduction = "umap.RNA", group.by = "stage")
+
+ggsave(file.path(res_dir, "umap_cell_types.png"), width = 13, height = 5.5, dpi = 600, bg = "white")
+```
+
+
+# Motif activity
+
+```{r chromvar}
+# chromVAR on all nuclei, as in the paper (Signac AddMotifs and RunChromVAR), with JASPAR 2024 vertebrate CORE (879 motifs,
+# EPAS1 included) instead of JASPAR2020 human
+jaspar <- RSQLite::dbConnect(RSQLite::SQLite(), db(JASPAR2024()))
+pfm <- getMatrixSet(jaspar, opts = list(collection = "CORE", tax_group = "vertebrates", all_versions = FALSE))
+
+DefaultAssay(seu) <- "ATAC"
+seu <- AddMotifs(seu, genome = BSgenome.Mmusculus.UCSC.mm10, pfm = pfm)
+
+# Signac 1.17 dropped RunChromVAR, so chromVAR is called directly, as RunChromVAR did (a missing GC bias set to 0)
+counts <- GetAssayData(seu, assay = "ATAC", layer = "counts")
+se <- SummarizedExperiment::SummarizedExperiment(assays = list(counts = counts), rowRanges = StringToGRanges(rownames(counts)))
+se <- chromVAR::addGCBias(se, genome = BSgenome.Mmusculus.UCSC.mm10)
+SummarizedExperiment::rowData(se)$bias[is.na(SummarizedExperiment::rowData(se)$bias)] <- 0
+
+motif_matches <- GetMotifData(seu, assay = "ATAC") # peaks x motifs
+background <- chromVAR::getBackgroundPeaks(se) # GC- and accessibility-matched peaks, drawn after the last seed set above (RunUMAP, 42)
+dev <- chromVAR::computeDeviations(se, annotations = motif_matches, background_peaks = background)
+
+seu[["chromvar"]] <- CreateAssayObject(data = chromVAR::deviationScores(dev)) # z-scores
+```
+
+
+# Myogenic nuclei
+
+```{r myogenic}
+# Fig. 6B UMAP: MuSCs, myoblasts and myonuclei, with the neighbours of lsi and integratedLSI found again within them (more
+# neighbours for a smoother path), mirrored on x so that the stages run left to right
+myogenic <- subset(seu, subset = cell_type %in% c("MuSCs", "Myoblasts", "Myonuclei"))
+myogenic <- FindMultiModalNeighbors(myogenic, reduction.list = list("lsi", "integratedLSI"), dims.list = list(1:30, 2:30), k.nn = 50)
+myogenic <- RunUMAP(myogenic, nn.name = "weighted.nn", reduction.name = "myogenic.umap", min.dist = 0.3, seed.use = 42)
+myogenic[["myogenic.umap"]]@cell.embeddings[, 1] <- -myogenic[["myogenic.umap"]]@cell.embeddings[, 1]
+
+DefaultAssay(myogenic) <- "RNA"
+
+DimPlot(myogenic, reduction = "myogenic.umap", group.by = "stage") + DimPlot(myogenic, reduction = "myogenic.umap", group.by = "cell_type") +
+  FeaturePlot(myogenic, reduction = "myogenic.umap", features = c("Pax7", "Mymk", "Myh3", "Myh4"), ncol = 2)
+
+ggsave(file.path(res_dir, "umap_myogenic.png"), width = 18, height = 5, dpi = 600, bg = "white")
+```
+
+
+# Save
+
+```{r save}
+# Fig. 6B: log-normalised RNA, the myogenic UMAP, cell_type and stage of the myogenic nuclei
+myogenic_rna <- DietSeurat(myogenic, assays = "RNA", layers = "data", dimreducs = "myogenic.umap")
+saveRDS(myogenic_rna, file.path(data_dir, "myogenic_rna.rds"))
+
+# Fig. 6B: motif activity (chromVAR z) of the same nuclei, rows named TF.ID (e.g. EPAS1.MA2325.1)
+motif_z <- GetAssayData(seu, assay = "chromvar", layer = "data")
+motif_z <- motif_z[, colnames(myogenic)]
+tf_names <- toupper(ConvertMotifID(seu, id = rownames(motif_z), assay = "ATAC"))
+rownames(motif_z) <- paste(tf_names, rownames(motif_z), sep = ".")
+saveRDS(motif_z, file.path(data_dir, "myogenic_motifs.rds"))
+```
+
+
+# END

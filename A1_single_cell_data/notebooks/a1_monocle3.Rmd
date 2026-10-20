@@ -1,0 +1,141 @@
+---
+title: "A1 SC Monocle3"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+pacman::p_load(Seurat, monocle3, tidyverse, patchwork, RColorBrewer, pheatmap)
+```
+
+
+# Load object
+```{r}
+# The processed cells from a1_preprocessing.Rmd, with their counts, metadata, UMAP and clusters
+a1_clean <- readRDS(file = "A1_single_cell_data/objects/a1_clean.rds")
+
+cds <- new_cell_data_set(GetAssayData(a1_clean, layer = "counts"),
+                         cell_metadata = a1_clean@meta.data,
+                         gene_metadata = data.frame(gene_short_name = rownames(a1_clean), row.names = rownames(a1_clean)))
+
+# Cluster colours as in the ShinyCell plots
+cluster_colours <- colorRampPalette(brewer.pal(12, "Paired"))(nlevels(a1_clean))
+names(cluster_colours) <- levels(a1_clean)
+```
+
+
+# Seurat Embedding and Clusters
+```{r}
+# The trajectory is learned on the UMAP of Fig. 1A, with the Seurat clusters. Monocle3 only adds the principal graph and the genes along it
+reducedDims(cds)[["UMAP"]] <- Embeddings(a1_clean, "umap")
+
+cds@clusters[["UMAP"]] <- list(clusters = setNames(a1_clean$cluster_name, colnames(a1_clean)),
+                               partitions = factor(setNames(rep(1, ncol(cds)), colnames(cds)))) # One partition, the cells form one continuum
+```
+
+
+# Trajectory
+```{r}
+# One principal graph through all cells
+cds <- learn_graph(cds, use_partition = FALSE)
+
+# There is no biological start point, so I manually set the order start at the end of the graph that holds the most TE-high cells, to fit the UMAP on Fig1
+graph <- principal_graph(cds)[["UMAP"]]
+graph_ends <- names(which(igraph::degree(graph) == 1))
+
+closest_vertex <- cds@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex[colnames(cds), 1] # Graph node of each cell
+cell_nodes <- igraph::V(graph)$name[closest_vertex]
+
+te_high_per_end <- table(factor(cell_nodes[cds$cluster_name == "TE-high"], levels = graph_ends))
+start <- names(which.max(te_high_per_end))
+
+cds <- order_cells(cds, root_pr_nodes = start)
+
+
+# UMAP coloured by the order, the left half of Supplementary Fig. 1B
+pseudotime_umap <- plot_cells(cds,
+                              color_cells_by = "pseudotime",
+                              label_cell_groups = FALSE,
+                              label_leaves = FALSE,
+                              label_branch_points = FALSE,
+                              label_roots = FALSE,
+                              cell_size = 0.5,
+                              trajectory_graph_segment_size = 0.4) +
+  theme_classic(base_size = 9) +
+  theme(axis.title = element_text(face = "bold"),
+        legend.position = "bottom",
+        legend.key.width = unit(8, "mm"),
+        legend.key.height = unit(2.5, "mm"))
+```
+
+
+# Genes along the Trajectory
+```{r}
+# Genes detected in at least 10% of the cells, as in FindAllMarkers
+expressed <- rowMeans(counts(cds) > 0) >= 0.1
+
+# Trajectory test (Moran´s I)
+trajectory_test <- graph_test(cds[expressed, ], neighbor_graph = "principal_graph", cores = 1) %>%
+  relocate(gene_short_name) %>%
+  arrange(desc(morans_I))
+
+write.csv(trajectory_test, "A1_single_cell_data/results/A1 Trajectory Genes.csv", row.names = FALSE) # All tested genes, Supplementary Table 1
+```
+
+
+# Supplementary Figure 1B
+```{r}
+# Supp. Fig. 1B: UMAP coloured by the order (left) and the genes along it (right)
+# The 30 trajectory genes (q < 0.05) with the highest Moran's I, genes with a symbol only, otherwise unreadable
+top_genes <- trajectory_test %>%
+  filter(q_value < 0.05, !grepl("^g\\.", gene_short_name), gene_short_name != "Pif5") %>%
+  slice_head(n = 30) %>%
+  pull(gene_short_name)
+
+# The cells in 100 equal bins along the order, each gene scaled across the bins and sorted by where it peaks
+cell_order <- order(pseudotime(cds))
+bins <- cut(seq_along(cell_order), 100, labels = FALSE)
+
+expression <- normalized_counts(cds, norm_method = "log")[top_genes, cell_order]
+binned <- sapply(split(seq_along(bins), bins), function(i) Matrix::rowMeans(expression[, i]))
+binned <- t(scale(t(binned)))
+binned <- binned[order(apply(binned, 1, which.max)), ]
+
+# The bar on top: the most common Seurat cluster of each bin
+bin_cluster <- sapply(split(as.character(cds$cluster_name[cell_order]), bins), function(x) names(which.max(table(x))))
+bin_annotation <- data.frame(Cluster = factor(bin_cluster, levels = levels(a1_clean)), row.names = colnames(binned))
+
+trajectory_heatmap <- pheatmap(pmin(pmax(binned, -2.5), 2.5), # Values beyond -2.5 and 2.5 in the end colours, as the heatmap in Supplementary Fig. 1A
+                               cluster_rows = FALSE,
+                               cluster_cols = FALSE,
+                               show_colnames = FALSE,
+                               annotation_col = bin_annotation,
+                               annotation_colors = list(Cluster = cluster_colours),
+                               color = colorRampPalette(rev(brewer.pal(7, "RdYlBu")))(100), # Blue-yellow-red, the pheatmap default of the bulk heatmaps
+                               breaks = seq(-2.5, 2.5, length.out = 101),
+                               legend_breaks = c(-2, 0, 2, 2.5),
+                               legend_labels = c("-2", "0", "2", "Scaled expression"), # The last label is the legend title
+                               border_color = NA,
+                               fontsize = 7.2,
+                               fontsize_row = 6.5, # Gene names 6.5 pt, as in panel A
+                               silent = TRUE)
+
+fig_trajectory <- (pseudotime_umap | wrap_elements(full = trajectory_heatmap$gtable)) +
+  plot_layout(widths = c(1, 1.9)) &
+  theme(plot.margin = margin(1, 1, 1, 1, "mm"))
+
+fig_trajectory
+
+ggsave(filename = "A1_single_cell_data/plots/SuppFig1B Monocle3 Trajectory_v2.png", plot = fig_trajectory, width = 200, height = 80, units = "mm", dpi = 600, bg = "white")
+```
+
+
+#END
+```{r}
+sessionInfo()
+```

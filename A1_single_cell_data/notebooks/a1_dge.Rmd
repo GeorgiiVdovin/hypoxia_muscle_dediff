@@ -1,0 +1,395 @@
+---
+title: "A1 SC DGE"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+# The GO packages before tidyverse, otherwise AnnotationDbi masks dplyr's select
+pacman::p_load(Seurat, clusterProfiler, org.Nviridescens.eg.db, tidyverse, patchwork, RColorBrewer, ggh4x)
+```
+
+
+# Load object
+```{r}
+a1_clean <- readRDS(file = "A1_single_cell_data/objects/a1_clean.rds")
+
+# Cluster colours as in the ShinyCell plots
+cluster_colours <- colorRampPalette(brewer.pal(12, "Paired"))(nlevels(a1_clean))
+names(cluster_colours) <- levels(a1_clean)
+```
+
+
+# Cluster Markers
+```{r}
+# Finding differentially expressed features (cluster biomarkers). Takes a few minutes
+a1_markers <- FindAllMarkers(a1_clean,
+                             only.pos = TRUE) # Test each cluster against the rest
+
+write.csv(a1_markers, "A1_single_cell_data/results/A1 Cluster Markers.csv", row.names = FALSE)
+```
+
+
+# GO Terms of the Clusters
+```{r}
+# Over-representation of GO BP terms among the up-regulated markers of each cluster, newt annotation package
+go_bp <- AnnotationDbi::select(org.Nviridescens.eg.db,
+                               keys = keys(org.Nviridescens.eg.db, keytype = "SYMBOL"),
+                               columns = c("GOALL", "ONTOLOGYALL"),
+                               keytype = "SYMBOL") %>%
+  filter(ONTOLOGYALL == "BP") %>%
+  mutate(SYMBOL = ifelse(grepl("^g\\.", SYMBOL), SYMBOL, str_to_sentence(str_remove(SYMBOL, "\\.[0-9]+$"))), # Same symbol merging as in a1_preprocessing.Rmd
+         SYMBOL = gsub("_", "-", SYMBOL)) %>%
+  distinct(GOALL, SYMBOL)
+
+go_names <- go2term(unique(go_bp$GOALL))
+
+go_bp <- go_bp %>%
+  filter(GOALL %in% go_names$go_id) # Obsolete terms have no name in the current GO.db
+
+
+# Background is all genes of the object with a GO term
+background <- intersect(rownames(a1_clean), go_bp$SYMBOL)
+
+cluster_up <- a1_markers %>%
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25, !grepl("^g\\.", gene)) %>%
+  with(split(gene, cluster))
+
+lengths(cluster_up) # Up-regulated markers per cluster
+length(background) # Background genes
+
+
+ego <- compareCluster(geneCluster = cluster_up,
+                      fun = enricher,
+                      TERM2GENE = go_bp,
+                      TERM2NAME = go_names,
+                      universe = background,
+                      minGSSize = 10,
+                      maxGSSize = 500,
+                      pvalueCutoff = 0.05,
+                      qvalueCutoff = 0.05)
+
+write.csv(as.data.frame(ego), "A1_single_cell_data/results/A1 Cluster GO BP.csv", row.names = FALSE)
+```
+
+
+# Supplementary Figure 2A
+```{r}
+# Supp. Fig. 2A: cell cycle scores and phases per cluster. S.Score and G2M.Score are the CellCycleScoring scores from before the regression
+# A cell is G1 when both are below 0, otherwise the phase of the higher score
+cc_violins <- VlnPlot(a1_clean,
+                      features = c("S.Score", "G2M.Score"),
+                      cols = cluster_colours,
+                      pt.size = 0,
+                      ncol = 2) &
+  geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") &
+  geom_hline(yintercept = 0, linetype = "dashed") & # Below 0 in both scores = G1
+  labs(y = "Score") &
+  theme_classic(base_size = 16) &
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        legend.position = "none")
+
+# Phases as % of cells per cluster
+phase_fractions <- a1_clean@meta.data %>%
+  count(cluster_name, Phase) %>%
+  group_by(cluster_name) %>%
+  mutate(percent = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(Phase = factor(Phase, levels = c("G2M", "S", "G1"))) # G1 at the bottom of the stack
+
+phase_bars <- ggplot(phase_fractions, aes(x = cluster_name, y = percent, fill = Phase)) +
+  geom_col(colour = "black") +
+  geom_text(aes(label = round(percent)), position = position_stack(vjust = 0.5), size = 4.5) +
+  scale_fill_manual(values = c(G1 = "grey92", S = "grey75", G2M = "grey55")) +
+  labs(x = NULL, y = "% of cells", title = "Phase") +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+cc_phases <- (cc_violins | phase_bars) + plot_layout(widths = c(2, 1))
+
+cc_phases
+
+ggsave(filename = "A1_single_cell_data/plots/SuppFig2A CC Phases per Cluster.png", plot = cc_phases, width = 16, height = 3.7, units = "in", dpi = 300, bg = "white")
+```
+
+
+```{r}
+phase_fractions
+```
+
+
+# Figure 1 Panels
+```{r}
+# Fig. 1A: UMAP with clusters. Same fonts as the ShinyCell panels, base size 24
+fig_umap <- DimPlot(a1_clean,
+                    reduction = "umap",
+                    cols = cluster_colours,
+                    pt.size = 1) +
+  theme_classic(base_size = 24) +
+  theme(axis.title = element_text(face = "bold"),
+        legend.position = "bottom") +
+  guides(colour = guide_legend(nrow = 2, byrow = TRUE, override.aes = list(size = 6)))
+
+fig_umap
+
+ggsave(filename = "A1_single_cell_data/plots/Fig1A UMAP Clusters.png", plot = fig_umap, width = 6, height = 6, units = "in", dpi = 300, bg = "white")
+```
+
+
+```{r}
+# Fig. 1B: dot plot of selected markers, one block per cluster with its UMAP colour as header
+# The genes discussed in the text, 8 per cluster, all significant markers of their cluster (p_adj < 0.05, log2FC > 0). The top 10 are in Supplementary Fig. 1A
+# G2M-high has few strong markers, so it is filled up with Hmgb2 (G2/M gene) and two of its top 10 (Arl6ip1, Polr2e)
+marker_blocks <- list("TE-high"        = c("Gag", "Gag-pol", "Pol", "Env", "Lorf2", "Ty3b-i", "Jockey\\pol", "Peg10"),
+                      "ECM-high"       = c("Mgp", "Mmp13", "Mmp14", "Timp3", "Igfbp5", "Bambi", "Pmepa1", "Tgfbi"),
+                      "G2M-high"       = c("Ube2c", "Cdc20", "Kpna2", "Hmgb2", "H2ax", "H4", "Arl6ip1", "Polr2e"),
+                      "G1/OxPhos-high" = c("Fkbp7", "Msmb", "Sfrp2", "Des", "Ndufs6", "Cox5a", "Uqcrb", "Rpl36a")) # DotPlot facets by the list names
+
+# ShinyCell bubble plot colours (blue-yellow-red), the end colours doubled
+bubble_colours <- c("#4575B4", "#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF", "#FEE090", "#FDAE61", "#F46D43", "#D73027", "#D73027")
+
+fig_dotplot <- DotPlot(a1_clean,
+                       features = marker_blocks) +
+  facet_grid2(~ feature.groups, scales = "free_x", space = "free_x",
+              strip = strip_themed(background_x = elem_list_rect(fill = cluster_colours))) +
+  scale_y_discrete(limits = rev) + # TE-high on top, so the diagonal reads left to right
+  scale_colour_gradientn(colours = bubble_colours, breaks = c(-1, 0, 1)) +
+  scale_size(range = c(0, 8), limits = c(0, 100), breaks = c(0, 25, 50, 75, 100)) +
+  guides(colour = guide_colourbar("expression", barwidth = 15, order = 1),
+         size = guide_legend("proportion", nrow = 1)) +
+  labs(x = NULL, y = "Cluster") +
+  theme_classic(base_size = 24) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+fig_dotplot
+
+ggsave(filename = "A1_single_cell_data/plots/Fig1B Markers Dotplot.png", plot = fig_dotplot, width = 18.5, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+
+```{r}
+# Fig. 1C: Acta2, Tagln and Vim in each cluster
+fig_violins <- VlnPlot(a1_clean,
+                       features = c("Acta2", "Tagln", "Vim"),
+                       cols = cluster_colours,
+                       pt.size = 0,
+                       ncol = 3) &
+  geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") &
+  theme_classic(base_size = 24) &
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold.italic", hjust = 0.5),
+        legend.position = "none")
+
+fig_violins
+
+ggsave(filename = "A1_single_cell_data/plots/Fig1C Marker Violins.png", plot = fig_violins, width = 12.5, height = 6, units = "in", dpi = 300, bg = "white")
+```
+
+
+# Supplementary Figure 1A
+```{r}
+# Supp. Fig. 1A: top 10 markers per cluster in single cells, scaled expression with the cells grouped by cluster
+# Ranked by log2FC (by p-value two clusters share abundant genes like Rplp1), genes with a symbol detected in >= 25 % of the cluster's cells
+# Pif5 removed by hand: a plant gene (phytochrome-interacting factor 5), most likely a misannotated contig. The next TE-high marker (Pif1) took its place
+top_markers <- a1_markers %>%
+  filter(p_val_adj < 0.05, pct.1 >= 0.25, !grepl("^g\\.", gene), gene != "Pif5") %>%
+  arrange(desc(avg_log2FC)) %>%
+  distinct(gene, .keep_all = TRUE) %>% # A gene goes to the cluster where its log2FC is highest
+  group_by(cluster) %>%
+  slice_head(n = 10) %>%
+  ungroup()
+
+
+markers_heatmap <- DoHeatmap(a1_clean,
+                             features = top_markers$gene,
+                             group.colors = cluster_colours,
+                             size = 8 / .pt, # Cluster names, 8 pt
+                             angle = 0, # Horizontal cluster names, G1/OxPhos-high is cut off at 45 degrees
+                             hjust = 0.5) + # Names centred over their cluster
+  scale_fill_gradientn(colours = colorRampPalette(rev(brewer.pal(7, "RdYlBu")))(100), # Blue-yellow-red as the bulk heatmaps and panel B
+                       limits = c(-2.5, 2.5), breaks = c(-2, 0, 2), na.value = "white") + # NA = the white lines between the clusters
+  coord_cartesian(ylim = c(0.5, nrow(top_markers) + 3), expand = FALSE, clip = "off") + # No empty margins, room above for the names
+  guides(colour = "none") + # No Identity legend, the names are above the bars
+  labs(fill = "Scaled\nexpression") +
+  theme(text = element_text(size = 9),
+        axis.text.y = element_text(size = 6.5, colour = "black")) &
+  theme(plot.margin = margin(1, 1, 1, 1, "mm")) # & so the patchwork that DoHeatmap returns gets the margin too
+
+markers_heatmap
+
+ggsave(filename = "A1_single_cell_data/plots/SuppFig1A Cluster Markers Heatmap_v2.png", plot = markers_heatmap, width = 200, height = 104, units = "mm", dpi = 600, bg = "white")
+```
+
+
+# Supplementary Figure 1C
+```{r}
+# Supp. Fig. 1C: GO terms of the clusters across the full width (200 x 56 mm). Terms on y so they read horizontally, one block per cluster, clusters on x
+# Top 4 terms per cluster. GOALL counts every gene for all parent terms, so a term is skipped if its genes overlap those of a better-ranked term of the same cluster with a Jaccard index >= 0.7
+drop_redundant <- function(terms) {
+  genes <- strsplit(terms$geneID, "/")
+  kept <- c()
+  for (i in seq_along(genes)) {
+    jaccard <- vapply(kept, function(j) length(intersect(genes[[i]], genes[[j]])) / length(union(genes[[i]], genes[[j]])), numeric(1))
+    if (all(jaccard < 0.7)) kept <- c(kept, i)
+    if (length(kept) == 4) break
+  }
+  terms[kept, ]
+}
+
+go_res <- as.data.frame(ego) %>%
+  mutate(Cluster = factor(Cluster, levels = levels(a1_clean)),
+         GeneRatio = DOSE::parse_ratio(GeneRatio))
+
+top_terms <- go_res %>%
+  arrange(p.adjust) %>%
+  group_split(Cluster) %>%
+  map_dfr(drop_redundant) %>%
+  arrange(p.adjust) %>%
+  distinct(Description, .keep_all = TRUE) # A term goes to the cluster where it is most significant
+
+# All clusters in which the selected terms are enriched
+go_plot_data <- go_res %>%
+  filter(Description %in% top_terms$Description) %>%
+  mutate(term_cluster = top_terms$Cluster[match(Description, top_terms$Description)],
+         Description = factor(Description, levels = top_terms$Description))
+
+fig_go <- ggplot(go_plot_data, aes(x = Cluster, y = Description, size = GeneRatio, colour = p.adjust)) +
+  geom_point() +
+  facet_grid2(term_cluster ~ ., scales = "free_y", space = "free_y",
+              strip = strip_themed(background_y = elem_list_rect(fill = cluster_colours))) +
+  scale_y_discrete(limits = rev) + # Most significant term on top
+  scale_colour_gradientn(colours = c("#f7ca64", "#46bac2", "#7e62a3"),
+                         trans = "log10",
+                         guide = guide_colourbar(reverse = TRUE, order = 1)) +
+  scale_size(range = c(0.8, 3.2)) +
+  labs(x = "Cluster", y = NULL, colour = "adj. p", size = "gene ratio") +
+  theme_classic(base_size = 9) +
+  theme(axis.title.x = element_text(face = "bold"),
+        strip.text = element_text(size = 8, face = "bold"),
+        strip.text.y = element_text(angle = 0), # Horizontal cluster names
+        strip.background = element_rect(linewidth = 0.3),
+        legend.key.size = unit(3, "mm"),
+        plot.margin = margin(1, 1, 1, 1, "mm"))
+
+fig_go
+
+ggsave(filename = "A1_single_cell_data/plots/SuppFig1C Cluster GO BP_v2.png", plot = fig_go, width = 200, height = 56, units = "mm", dpi = 600, bg = "white")
+```
+
+
+# Supplementary Figure 1D
+```{r}
+# Supp. Fig. 1D: the TE-high cells map worse
+# TE genes: most contigs of the gene hit a transposon or retrovirus protein in Swiss-Prot (Gag, Pol, Env, LINE-1, Ty3, Tf2, Jockey, piggyBac ...)
+annotations <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv") %>%
+  mutate(SYMBOL = ifelse(grepl("^g\\.", SYMBOL), SYMBOL, str_to_sentence(str_remove(SYMBOL, "\\.[0-9]+$"))), # Same symbol merging as in a1_preprocessing.Rmd
+         SYMBOL = gsub("_", "-", SYMBOL))
+
+te_genes <- annotations %>%
+  group_by(SYMBOL) %>%
+  summarise(te = mean(grepl("transpos|retrovir|reverse transcriptase|RNA-directed DNA polymerase|\\bLINE-1|Gag|Env polyprotein|Envelope glycoprotein|K02A2.6", Description_SP, ignore.case = TRUE) &
+                      !grepl("telomerase", Description_SP, ignore.case = TRUE))) %>%
+  filter(te > 0.5) %>%
+  pull(SYMBOL) %>%
+  intersect(rownames(a1_clean))
+
+a1_clean[["percent.te"]] <- PercentageFeatureSet(a1_clean, features = te_genes)
+
+
+# Mapping rate per cluster
+mapping_violin <- VlnPlot(a1_clean,
+                          features = "percent.mapped",
+                          cols = cluster_colours,
+                          pt.size = 0) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+  labs(x = NULL, y = "Reads mapped (%)", title = NULL) +
+  theme_classic(base_size = 9) +
+  theme(axis.title.y = element_text(face = "bold"),
+        legend.position = "none")
+
+# Share of TE genes against the mapping rate, each point a cell, one line per cluster
+te_scatter <- ggplot(a1_clean@meta.data, aes(x = percent.mapped, y = percent.te, colour = cluster_name)) +
+  geom_point(size = 0.5, alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.6) +
+  scale_colour_manual(values = cluster_colours) +
+  scale_y_log10() +
+  labs(x = "Reads mapped (%)", y = "UMIs on TE\ngenes (%)", colour = NULL) +
+  theme_classic(base_size = 9) +
+  theme(axis.title = element_text(face = "bold"),
+        legend.key.size = unit(3.4, "mm")) +
+  guides(colour = guide_legend(override.aes = list(size = 2.5, alpha = 1, linewidth = 0)))
+
+fig_te <- (mapping_violin | te_scatter) & # Equal widths, so the violin panel is wide enough for the horizontal cluster names
+  theme(plot.margin = margin(1, 1, 1, 1, "mm"))
+
+fig_te
+
+ggsave(filename = "A1_single_cell_data/plots/SuppFig1D Mapping Rate TE_v2.png", plot = fig_te, width = 200, height = 42, units = "mm", dpi = 600, bg = "white")
+```
+
+
+# Cluster Markers in the Bulk Time Course
+```{r}
+# The up-regulated markers of each cluster (the GO input above) in the bulk myotube time course: lower in 120h myotubes than in 0h cells,
+# and up again 8h after serum re-addition (128h vs 120h), when IPA predicts TGFB1 activation. The numbers are in the Results (TGFb section)
+
+# DESeq2 results that went into IPA (IPA_data/ipa_dataprep_pairwise_dge.Rmd): 128h vs 120h from the sequential comparisons, 120h vs 0h from the comparisons to 0h
+bulk_128h <- read.csv("IPA_data/IPA Results Sequential Comparisons Myotubes.csv") %>%
+  select(GENEID, SYMBOL, baseMean = baseMean_8_vs_0, lfc_128 = log2FoldChange_128_vs_120, padj_128 = padj_128_vs_120)
+
+bulk_120h <- read.csv("IPA_data/IPA Results All vs 0h.csv") %>%
+  select(GENEID, lfc_120 = log2FoldChange_120_vs_0, padj_120 = padj_120_vs_0)
+
+bulk <- bulk_128h %>%
+  left_join(bulk_120h, by = "GENEID") %>%
+  filter(!is.na(SYMBOL), !grepl("^g\\.", SYMBOL)) %>%
+  mutate(gene = gsub("_", "-", str_to_sentence(str_remove(SYMBOL, "\\.[0-9]+$")))) %>% # Same symbol merging as in a1_preprocessing.Rmd
+  group_by(gene) %>%
+  slice_max(baseMean, n = 1, with_ties = FALSE) %>% # A merged symbol takes its most highly expressed bulk gene
+  ungroup() %>%
+  mutate(lower_120h = padj_120 < 0.001 & lfc_120 < 0, # padj < 0.001 as for the 128h vs 120h genes in the paper
+         up_128h = padj_128 < 0.001 & lfc_128 > 0)
+
+markers_bulk <- a1_markers %>%
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25, !grepl("^g\\.", gene)) %>%
+  inner_join(bulk, by = "gene")
+
+# 46 of the 60 ECM-high markers lower at 120h, 14 up again at 128h
+markers_bulk %>%
+  group_by(cluster) %>%
+  summarise(markers = n(),
+            n_lower_120h = sum(lower_120h, na.rm = TRUE),
+            n_up_128h = sum(up_128h, na.rm = TRUE),
+            percent_up_128h = round(100 * sum(up_128h, na.rm = TRUE) / n()))
+
+# All annotated genes, for comparison
+bulk %>%
+  summarise(genes = n(),
+            percent_up_128h = round(100 * sum(up_128h, na.rm = TRUE) / n(), 1))
+
+# The ECM-high markers that are up again at 128h, all of them lower at 120h
+markers_bulk %>%
+  filter(cluster == "ECM-high", up_128h) %>%
+  select(gene, lower_120h, lfc_120, lfc_128, padj_128)
+```
+
+
+#END
+```{r}
+sessionInfo()
+```

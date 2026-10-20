@@ -1,0 +1,44 @@
+---
+title: "Myf5, Myog and Myf6 from the Sandberg transcriptome (Fig. 2F)"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+# To add a new package: renv::install("packageName") or renv::install("bioc::packageName"), then renv::snapshot(). Snapshots are always run in the console
+
+pacman::p_load(tidyverse, DESeq2, tximport)
+```
+
+```{r muscle-genes}
+# Myf5, Myog and Myf6 are missing from the Del-Tsonis transcriptome, so the myotube time course was also aligned (salmon) to 
+# the Sandberg transcriptome (Abdullayev et al., 2013). Transcript-level vst values of their contigs go into the Fig. 2F heatmap (muscle_diff.csv, read by A1_diff_dediff.Rmd)
+dir <- "sandberg_reference_realigned_bulk/salmon_MT_quant_Sandberg_reference"
+
+coldata <- read.table(file.path(dir, "samples.txt"), header = TRUE) %>%
+  mutate(timepoint = factor(timepoint))
+rownames(coldata) <- coldata$replicate
+
+files <- setNames(file.path(dir, coldata$filename), coldata$replicate)
+txi <- tximport(files, type = "salmon", txOut = TRUE)
+
+# Pre-filter -> at least 10 counts in 3 samples, as for the Del-Tsonis data
+dds <- DESeqDataSetFromTximport(txi, colData = coldata, design = ~ timepoint)
+dds <- DESeq(dds[rowSums(counts(dds) >= 10) >= 3, ])
+
+vsd <- vst(dds, blind = FALSE)
+
+muscle <- assay(vsd)[c("comp460329_c0_seq1", "comp799573_c0_seq1", "comp117581_c0_seq1"), ]
+rownames(muscle) <- c("Myf5", "Myog", "Myf6")
+
+write.csv(muscle, "muscle_diff.csv")
+```
+
+```{r}
+sessionInfo()
+```

@@ -6,249 +6,139 @@ editor_options:
 ---
 
 ```{r setup}
-suppressPackageStartupMessages({if (!require("BiocManager", quietly = TRUE))
-    install.packages("BiocManager")
-})
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
 
-pacman::p_load(dplyr, data.table, ggplot2, tidyverse, BiocManager, readr, tximport, ggrepel)
-
-library(org.Nviridescens.eg.db)
+pacman::p_load(tidyverse, tximport)
 ```
 
 
-###############
-#PREPARING DATA
-###############
-
+#Preparing Data
 ```{r}
-# Load in annotations
-annotations_combined <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/Combined Annotations Nvir/Nvir_annotations_combined.csv", header = TRUE)
+# Read in kallisto abundance files of the 3 control proliferating A1 samples (0h)
+dir <- "A1_cross_species_comparisons/top_tpm_A1/kallisto_quant_MT_katia"
 
-# Katia annotations
-annotations <- read.csv("C:/Users/gevd910d/Desktop/A1 Analysis/Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
-
-head(annotations)
-```
-
-
-
-```{r}
-# Read in kallisto abundance files
-
-dir <- "C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1/kallisto_quant_MT_katia"
-
-list.files(dir)
-```
-
-
-
-```{r}
-# Read in only the control proliferating samples
-
-files <- file.path(dir, c("Ctrl_0h_1_ Abundances (tabular).tabular", 
-                          "Ctrl_0h_2_ Abundances (tabular).tabular", 
+files <- file.path(dir, c("Ctrl_0h_1_ Abundances (tabular).tabular",
+                          "Ctrl_0h_2_ Abundances (tabular).tabular",
                           "Ctrl_0h_3_ Abundances (tabular).tabular"))
-all(file.exists(files))
 
-names(files) <- c("Ctrl_0h_1", "Ctrl_0h_2", "Ctrl_0h_3")
-
-files
-```
-
-
-
-```{r}
 tx2gene <- read.csv(file.path(dir, "tx2gene_nvir_katia.csv"))
 
-txi.kallisto <- tximport(files, 
+txi.kallisto <- tximport(files,
                          type = "kallisto",
-                         tx2gene = tx2gene) 
+                         tx2gene = tx2gene)
 
 abundance <- txi.kallisto$abundance # Extract TPM
-
 ```
 
 
-###########
 #Median GEX
-###########
 ```{r}
+# Katia Del-Rio Tsonis Lab transcriptome annotations
+annotations <- read.csv("Nvir_Annotations/Nvir Latest Annotation Katia/Nvir_annotations_MT_Katia_final.csv", header = TRUE)
+
 # Calculate median TPM values for every gene across replicates => more resistant to outliers
-
-median_tpm <-  rowMedians(abundance) 
-
-median_tpm <- data.frame(median_tpm, 
-                         GENEID = rownames(abundance))
-```
-
-
-```{r}
-# Sort genes by median TPM value
+median_tpm <- data.frame(GENEID = rownames(abundance),
+                         median_tpm = matrixStats::rowMedians(abundance))
 
 median_tpm <- median_tpm %>%
   left_join(annotations, by = "GENEID") %>%
   arrange(desc(median_tpm)) %>%
-  mutate(percentile = ntile(median_tpm, 100)) # Calculate the expression percentiles for every gene
-    
+  distinct(SYMBOL, .keep_all = TRUE) %>% # Keep the most expressed gene of each symbol
+  mutate(median_tpm = round(median_tpm, 2)) %>%
+  mutate(logmedian = round(log2(median_tpm + 1), 2)) %>% # Log-transform
+  mutate(median_tpm = round(median_tpm)) %>% # Whole TPM, used to sort the bars
+  dplyr::select(SYMBOL, median_tpm, logmedian)
 
-median_tpm$median_tpm <- round(median_tpm$median_tpm, 2)
+# Myf5, Myog and Myf6 are missing from this annotation: their values come from the Sandberg transcriptome (made in top_tpm_A1_Sandberg)
+sandberg_myogenesis <- read.csv("A1_cross_species_comparisons/top_tpm_A1_Sandberg/Myogenesis_genes_Sandberg.csv") %>%
+  dplyr::select(SYMBOL, median_tpm, logmedian)
 
-
-
-median_tpm <- median_tpm %>% mutate(logmedian = log2(median_tpm + 1))  # Log-transform 
-
-median_tpm$logmedian <- round(median_tpm$logmedian, 2)
+median_tpm <- bind_rows(median_tpm, sandberg_myogenesis)
 ```
 
 
-
+#Cell Type Markers
 ```{r}
-# Missing myogenesis genes from the Sandberg annotation
+# Marker genes of each cell type, with their symbols in the newt annotation. Myod1 is not in it
+smooth_muscle <- c("TAGLN", "ACTA2", "Cald1", "des", "Aebp1.3", "MYOCD", "MYH11.2", "MYH9.3", "Myh9.4", "CCN1", "PALLD", "MYL9.1", "CNN1", "TPM2", "tpm1.3", "Tagln2.3", "Mcam", "TINAGL1", "FLNA.4", "Myf6")
+fibroblast <- c("Col5a2.2", "Loxl1", "Pdgfra", "FBLN1.1", "LUM.1", "DPT", "HSD11B1.1", "CD34", "FBLN1.2", "Fbln2")
+mixed <- c("COL1A2", "COL1A1.2", "TIMP2", "Col12a1.2", "COL6A2.4", "VIM.1", "fn1", "COL5A1.2", "RGS4", "MGST3", "CCN2")
+myoblast <- c("pax3", "Pax7", "Myf5", "Myog")
 
-sandberg_myogenesis <- fread("C:/Users/gevd910d/Desktop/A1 Analysis/A1_C2C12_myoblast_comparison/top_tpm_A1_Sandberg/Myogenesis_genes_Sandberg.csv", header = TRUE) %>%
-  dplyr::select(target_id, SYMBOL, median_tpm, percentile, logmedian) %>%
-  rename(target_id = "GENEID")
+marker_tpm <- median_tpm %>%
+  dplyr::filter(SYMBOL %in% c(smooth_muscle, fibroblast, mixed, myoblast)) %>%
+  mutate(cell_type = case_when(SYMBOL %in% smooth_muscle ~ "Smooth Muscle",
+                               SYMBOL %in% fibroblast ~ "Fibroblast",
+                               SYMBOL %in% mixed ~ "Mixed",
+                               SYMBOL %in% myoblast ~ "Myoblast")) %>%
+  mutate(cell_type = factor(cell_type, levels = c("Smooth Muscle", "Fibroblast", "Mixed", "Myoblast"))) %>%
+  mutate(SYMBOL = str_to_sentence(SYMBOL)) %>% # Mouse-style symbols, e.g. TAGLN -> Tagln
+  arrange(cell_type, desc(median_tpm)) %>% # Most expressed genes first within each cell type
+  mutate(SYMBOL = factor(SYMBOL, levels = unique(SYMBOL))) # Keep this order on the x axis
 ```
 
 
-
+#Fig. 1D and Supplementary Fig. 2B
 ```{r}
-# Isolate relevant columns and merge with missing genes 
+# Fig. 1D and Supplementary Fig. 2B: log2 median TPM of the cell type markers in A1 cells
+# Gene labels stand upright above the bars. A label that would touch the one on its left is lifted above it and joined to its bar by a thin line
+marker_tpm$label_len <- nchar(as.character(marker_tpm$SYMBOL)) * 0.2 # Approximate label length in y units
 
-marker_tpm_all <- median_tpm %>%
-  mutate(median_tpm = round(median_tpm)) %>%
-  dplyr::select(GENEID, SYMBOL, median_tpm, percentile, logmedian) %>%
-  distinct(SYMBOL, .keep_all = TRUE)
-  
+marker_tpm$label_y <- marker_tpm$logmedian + 0.15
 
-marker_tpm_all <- rbind(marker_tpm_all, sandberg_myogenesis)
-```
+for (i in 2:nrow(marker_tpm)) {
+  left_top <- marker_tpm$label_y[i - 1] + marker_tpm$label_len[i - 1] + 0.25 # Top of the label on the left, plus a gap
+  touch <- marker_tpm$label_y[i] < left_top &
+    marker_tpm$label_y[i - 1] < marker_tpm$label_y[i] + marker_tpm$label_len[i] + 0.25
+  if (touch) marker_tpm$label_y[i] <- left_top
+}
 
-
-
-
-```{r}
-# Add cell type marker labels for each gene
-
-marker_tpm <- marker_tpm_all %>%
-  dplyr::filter(SYMBOL %in% 
-                  
-                  c("TAGLN", "ACTA2", "Cald1", "des", "Aebp1.3", "MYOCD", "MYH11.2", "MYH9.3", "Myh9.4", "CCN1", "PALLD", "MYL9.1", "CNN1", "TPM2", "tpm1.3", "Tagln2.3", "Mcam", "TINAGL1", "FLNA.4", "Myog", "Myf6",
-                    
-                    "Col5a2.2", "Loxl1", "Pdgfra", "FBLN1.1", "LUM.1", "DPT", "HSD11B1.1", "CD34", "FBLN1.2", "Fbln2",
-                    
-                    
-                    "COL1A2", "COL1A1.2", "TIMP2", "Col12a1.2", "COL6A2.4", "VIM.1", "fn1", "COL5A1.2", "RGS4", "MGST3", "CCN2",
-                    
-                    "pax3", "Pax7", "Myf5"
-                    
-                    
-                    )) %>% # Rename genes
-  
-  
-  dplyr::mutate(SYMBOL = str_to_sentence(SYMBOL)) %>%
-  
-  
-  
-  dplyr::mutate(cell_type = dplyr::case_when(
-    SYMBOL %in% c("Tagln", "Acta2", "Cald1", "Des", "Aebp1.3", "Myocd", "Myh11.2", "Myh9.3", "Myh9.4", "Ccn1", "Palld", "Myl9.1", "Cnn1", "Tpm2", "Tpm1.3", "Tagln2.3", "Mcam", "Tinagl1", "Flna.4", "Myog", "Myf6") ~ "Smooth Muscle",
-    
-    SYMBOL %in% c("Col5a2.2", "Loxl1", "Pdgfra", "Fbln1.1", "Lum.1", "Dpt", "Hsd11b1.1", "Cd34", "Fbln1.2", "Fbln2") ~ "Fibroblast",
-    
-    SYMBOL %in% c("Col1a2", "Col1a1.2", "Timp2", "Col12a1.2", "Col6a2.4", "Vim.1", "Fn1", "Col5a1.2", "Rgs4", "Mgst3", "Ccn2") ~ "Mixed",
-    
-    SYMBOL %in% c( "Pax3", "Pax7", "Myf5") ~ "Myoblast"
-
-    
-    
-  )) 
-```
-
-
-
-```{r}
-# Set the order of cell_type
-marker_tpm$cell_type <- factor(marker_tpm$cell_type, 
-                               levels = c("Smooth Muscle", "Fibroblast", "Mixed", "Myoblast"))
-
-marker_tpm <- marker_tpm %>%
-  arrange(cell_type, desc(median_tpm)) %>%
-  mutate(SYMBOL = factor(SYMBOL, levels = unique(SYMBOL)))
-
-# Define colors)
-color_palette <- c("Smooth Muscle" = "#F8766D", 
-                   "Fibroblast" = "#00BFC4", 
-                   "Mixed" = "#7CAE00", 
+color_palette <- c("Smooth Muscle" = "#F8766D",
+                   "Fibroblast" = "#00BFC4",
+                   "Mixed" = "#7CAE00",
                    "Myoblast" = "#C77CFF")
-```
 
-```{r}
-
-ggplot(marker_tpm, aes(x = SYMBOL, y = median_tpm, fill = cell_type)) +
-  geom_bar(stat = "identity") +
-  geom_text(aes(label = SYMBOL, vjust = -0.2, hjust = -0.1, angle = 40, size = 3), show.legend = FALSE) +
-  geom_hline(yintercept = 10, linetype = "dashed", color = "black") +
-  geom_hline(yintercept = 1000, linetype = "dashed", color = "black") +
-  
-  annotate("text", x = Inf, y = 3.32, label = "Expression thr", vjust = 1, hjust = 1.1, color = "red", size = 3.5) + # Add label to the dashed line
-  scale_fill_manual(values = color_palette) +  # Apply the color palette
-  theme_minimal() +
-  labs(title = "Median TPM Across 3 Bulk A1 Samples",
-       x = "Gene Symbol",
-       y = "Median TPM") +
-  #scale_fill_manual(values = c("Smooth Muscle" = "blue", "Fibroblast" = "red", "Myoblast" = "green")) +
-  ylim(0, NA) +
-  theme(legend.title = element_blank(),
+tpm_plot <- ggplot(marker_tpm, aes(x = SYMBOL, y = logmedian, fill = cell_type)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = c(3.32, 9.97), linetype = "dashed", linewidth = 0.3, colour = "grey30") + # 10 and 1000 TPM
+  geom_rect(aes(xmin = as.numeric(SYMBOL) - 0.5, xmax = as.numeric(SYMBOL) + 0.35, ymin = label_y, ymax = label_y + label_len),
+            fill = "white", inherit.aes = FALSE) + # White behind each label, so that the dashed lines stop at the labels
+  geom_segment(data = dplyr::filter(marker_tpm, label_y > logmedian + 0.2),
+               aes(xend = SYMBOL, y = logmedian + 0.05, yend = label_y - 0.05),
+               linewidth = 0.2, colour = "grey40") + # Line from a lifted label to its bar
+  geom_text(aes(y = label_y, label = SYMBOL), angle = 90, hjust = 0, vjust = 0.4, size = 6.5 / .pt) + # 6.5 pt gene labels, centred on the letters including descenders
+  scale_fill_manual(values = color_palette) +
+  scale_x_discrete(expand = expansion(add = c(0.9, 0.8))) +
+  scale_y_continuous(limits = c(0, 15), breaks = seq(0, 12, by = 3), expand = c(0, 0), # Same y axis in all panels, with room for the lifted labels
+                     sec.axis = dup_axis(breaks = c(3.32, 9.97), labels = c("10 TPM", "1000 TPM"), name = NULL)) + # Name the dashed lines
+  labs(title = "A1 (bulk, 3 samples)",
+       x = "Gene symbol",
+       y = "Log2 median TPM") +
+  theme_classic(base_size = 10) +
+  theme(plot.title = element_text(face = "bold", size = 10, hjust = 0.5),
+        axis.title = element_text(face = "bold", colour = "black"),
+        axis.text = element_text(colour = "black"),
         axis.text.x = element_blank(), # Remove x-axis labels
-        axis.ticks.x = element_blank()) 
-```
-
-
-```{r}
-# Log2 scale
-
-ggplot(marker_tpm, aes(x = SYMBOL, y = logmedian, fill = cell_type)) +
-  geom_bar(stat = "identity", show.legend = FALSE) + 
-  
-    geom_text_repel(aes(label = SYMBOL), 
-                  size = 5, 
-                  vjust = -0.2,  
-                  hjust = 0.0,   
-                  angle = 40,    
-                  box.padding = 0.3,  # Adjust padding between labels
-                  point.padding = 0.2,  # Adjust padding between points and labels
-                  segment.size = 0,  # Remove the lines between label and bar
-                  show.legend = FALSE) + 
-  
-  geom_hline(yintercept = 3.32, linetype = "dashed", color = "black") + # 10 TPM
-  geom_hline(yintercept = 9.97, linetype = "dashed", color = "black") + # 1000 TPM
-  
-  annotate("text", x = Inf, y = 9.97, label = "1000 TPM", vjust = -0.5, hjust = 1.1, color = "red", size = 3.5) + # Add label to the dashed line
-  
-  annotate("text", x = Inf, y = 3.32, label = "10 TPM", vjust = -0.5, hjust = -0.5, color = "red", size = 3.5) + # Add label to the dashed line
-  
-  scale_fill_manual(values = color_palette) +  # Apply the color palette
-  
-  theme_minimal() +
-  labs(title = "Log2 Median TPM Across 3 Bulk A1 Samples",
-       x = "Gene Symbol",
-       y = "Log2 Median TPM") +
-  ylim(0, NA) +
-  coord_cartesian(clip = "off") +  # Allow plotting outside the panel
-    theme(legend.title = element_blank(),
-        axis.text.x = element_blank(),  # Remove x-axis labels
         axis.ticks.x = element_blank(),
-        plot.title = element_text(size = 20, hjust = 0.5),  # Increase title size
-        axis.title.x = element_text(size = 16),  # Increase x-axis label size
-        axis.title.y = element_text(size = 16))  # Increase y-axis label size
+        axis.text.y.right = element_text(size = 7, angle = 90, hjust = 0.5, colour = "red3"), # Labels of the dashed lines
+        axis.line.y.right = element_blank(),
+        legend.position = "top",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 7.5),
+        legend.key.size = unit(3, "mm"),
+        legend.margin = margin(0, 0, 0, 0),
+        legend.box.spacing = unit(1.5, "mm"))
 
-ggsave(filename = "Log2 Median TPM A1 Samples.png", width = 10, height = 12, dpi = 1200)
+tpm_plot
+
+ggsave(filename = "A1_cross_species_comparisons/top_tpm_A1/Log2 Median TPM A1 Samples_v2.png", plot = tpm_plot, width = 102, height = 123, units = "mm", dpi = 600, bg = "white") # Fig. 1D
+ggsave(filename = "A1_cross_species_comparisons/top_tpm_A1/Log2 Median TPM A1 Samples_Supp_v2.png", plot = tpm_plot, width = 99, height = 114, units = "mm", dpi = 600, bg = "white") # Supplementary Fig. 2B
 ```
 
-####
+
 #END
-####
 ```{r}
 sessionInfo()
 ```
-

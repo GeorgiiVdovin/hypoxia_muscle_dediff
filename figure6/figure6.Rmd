@@ -1,0 +1,615 @@
+---
+title: "Figure 6 - HIF genes in differentiation, development and regeneration"
+output: html_notebook
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+project_root <- rprojroot::find_rstudio_root_file()
+knitr::opts_knit$set(root.dir = project_root)
+setwd(project_root)
+
+# To add a new package: renv::install("packageName") or renv::install("bioc::packageName"), then renv::snapshot(). Snapshots are always run in the console
+
+pacman::p_load(tidyverse, readxl, tximport, DESeq2, Seurat, RColorBrewer, patchwork)
+
+# The Data chunks pull the plotted values out of the upstream analyses into figure6/data
+data_dir <- "figure6/data"
+plot_dir <- "figure6/plots"
+
+theme_fig <- theme_minimal(base_size = 7) +
+  theme(plot.title = element_text(face = "bold", size = 7.5, hjust = 0.5),
+        axis.text = element_text(size = 6.5, colour = "black"),
+        legend.text = element_text(size = 6), legend.title = element_text(size = 6.5),
+        legend.key.size = unit(3, "mm"), panel.grid = element_blank())
+
+# Colours as in Fig. 1
+heat_colours <- colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100)
+bubble_colours <- c("#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF", "#FEE090", "#FDAE61", "#F46D43", "#D73027")[c(1, 1:9, 9)]
+
+# Genes of C and E, the same in both panels: the genes discussed in the text, 
+# grouped by pathway
+gene_groups <- list("Energy metabolism" = c("PPARGC1A", "LDHA", "PKM"),
+                    "TGFβ"              = c("TGFB1", "SMAD7", "PMEPA1", "BAMBI", "SERPINE1", "TIMP3", "F3", "RFLNB", "FN1"),
+                    "Myogenesis"        = c("PAX3", "MYOD1", "MYOG"), # shown as "not detected" where a dataset lacks them
+                    "Hypoxia"           = c("HIF1A", "EPAS1", "HIF3A", "EGLN3", "BHLHE40", "SPRY1", "VEGFA"),
+                    "Other"             = c("IL11", "RGCC", "CDKN1B"))
+
+umap_genes <- c("PPARGC1A", "EPAS1") # B: genes on the UMAP
+b_myogenesis <- c("MYOD1", "MYOG", "PAX3", "MYF6") # B: the Myogenesis group plus MYF6 (MRF4, the MRF of mature fibres), shown with the MyoD and myogenin motifs
+b_tgfb <- "SMAD3" # B: added to the TGFβ group, shown with its motif
+
+label_gene <- function(x) sub("^EPAS1$", "HIF2A (EPAS1)", x)
+mouse_symbol <- function(x) paste0(substr(x, 1, 1), tolower(substring(x, 2))) # PPARGC1A -> Ppargc1a
+
+# Pathway group of a gene symbol or label, as a factor in the order of gene_groups; genes outside the groups are "Other"
+gene_group <- function(x) {
+  group_of_gene <- setNames(rep(names(gene_groups), lengths(gene_groups)), label_gene(unlist(gene_groups)))
+  factor(coalesce(group_of_gene[label_gene(x)], "Other"), levels = names(gene_groups))
+}
+
+# Gene order within each pathway group, used in B, C and E: from hierarchical clustering of C.
+c_lfc <- read.csv(file.path(data_dir, "regeneration_lfc.csv")) %>%
+  mutate(gene = replace(gene, gene == "HIF2A (EPAS1)", "EPAS1"))
+c_matrix <- tapply(c_lfc$log2FoldChange, list(c_lfc$gene, c_lfc$column), mean) # genes x the five C columns
+c_matrix <- pmin(pmax(c_matrix, -3), 3)
+
+fig6_genes <- c()
+for (genes in gene_groups) {
+  clustered <- genes[genes %in% rownames(c_matrix)]
+  clustered <- clustered[rowSums(is.na(c_matrix[clustered, , drop = FALSE])) == 0]
+  if (length(clustered) > 2) {
+    clustered <- clustered[hclust(dist(c_matrix[clustered, , drop = FALSE]))$order]
+  }
+  fig6_genes <- c(fig6_genes, clustered, setdiff(genes, clustered))
+}
+
+# Pathway labels of the B, C and E groups: bold, horizontal, outside the gene names
+theme_groups <- theme(strip.placement = "outside", strip.text.y.left = element_text(angle = 0, hjust = 1, face = "bold", size = 6.5),
+                      strip.clip = "off", panel.spacing.y = unit(1, "mm"), plot.title.position = "plot")
+
+# A and D: the genes in this order, under their pathway (nested strips: pathway plain, gene bold)
+ae_pathway <- c(PPARGC1A = "Energy metabolism", SERPINE1 = "TGFβ", HIF2A = "Hypoxia", HIF3A = "Hypoxia")
+ae_strips <- ggh4x::strip_nested(text_x = ggh4x::elem_list_text(face = c("plain", "bold"), size = c(6.5, 7)), by_layer_x = TRUE,
+                                 text_y = ggh4x::elem_list_text(face = c("plain", "bold"), size = c(6.5, 7)), by_layer_y = TRUE)
+in_ae_order <- function(d) {
+  d %>%
+    mutate(pathway = factor(ae_pathway[gene], levels = unique(ae_pathway)),
+           gene = factor(gene, levels = names(ae_pathway)))
+}
+```
+
+
+# Data
+
+```{r data-culture}
+# Fig. 6A: HIF2A, HIF3A, PPARGC1A (OxPhos) and SERPINE1 (TGFβ target) during myogenic differentiation in culture, log2 FC vs 0h per
+# timepoint: newt A1 (this study, 0-120h only) and mouse C2C12 (Denes et al. 2019, GSE148667, days 0/4/7 of differentiation on plastic).
+# DESeq2 on the salmon quantifications, genes with at least 10 counts in 3 samples (mouse Hif3a is below this filter)
+newt_samples <- read.table("salmon_MT_Katia_reference/samples.txt", header = TRUE) %>%
+  mutate(timepoint = factor(timepoint))
+rownames(newt_samples) <- newt_samples$replicate
+newt_files <- setNames(file.path("salmon_MT_Katia_reference", newt_samples$filename), newt_samples$replicate)
+newt_txi <- tximport(newt_files, type = "salmon", tx2gene = read.csv("salmon_MT_Katia_reference/tx2gene_nvir_katia.csv"))
+
+c2c12_dir <- "revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3"
+c2c12_samples <- read.csv(file.path(c2c12_dir, "GSE148667_metadata.csv")) %>%
+  mutate(timepoint = factor(differentiation_day * 24))
+rownames(c2c12_samples) <- c2c12_samples$Run
+c2c12_files <- setNames(file.path(c2c12_dir, "GSE148667_salmon", paste0(c2c12_samples$Run, ".tabular")), c2c12_samples$Run)
+c2c12_txi <- tximport(c2c12_files, type = "salmon", tx2gene = read.csv("A1_cross_species_comparisons/tx2gene_mouse.csv"))
+
+fit_deseq <- function(txi, samples) {
+  dds <- DESeqDataSetFromTximport(txi, colData = samples, design = ~ timepoint)
+  dds <- dds[rowSums(counts(dds) >= 10) >= 3, ] # at least 10 counts in 3 samples
+  DESeq(dds)
+}
+
+# Newt IDs: EPAS1.3, HIF3A (as in C and D), PPARGC1A.1 (as in Fig. 5B) and SERPINE1 (highest expressed copy, as in C)
+culture <- list(
+  "A1"    = list(species = "Newt A1 (this study)",
+                 dds = fit_deseq(newt_txi, newt_samples),
+                 ids = c(HIF2A = "g.626210", HIF3A = "g.140107", PPARGC1A = "g.657639", SERPINE1 = "g.779325")),
+  "C2C12" = list(species = "Mouse C2C12 (Denes 2019)",
+                 dds = fit_deseq(c2c12_txi, c2c12_samples),
+                 ids = c(HIF2A = "ENSMUSG00000024140", HIF3A = "ENSMUSG00000004328", PPARGC1A = "ENSMUSG00000029167",
+                         SERPINE1 = "ENSMUSG00000037411"))
+)
+
+# log2 FC of every timepoint vs 0h, for the genes that pass the filter
+culture_lfc <- imap_dfr(culture, function(x, name) {
+  ids <- x$ids[x$ids %in% rownames(x$dds)]
+  timepoints <- setdiff(levels(x$dds$timepoint), "0")
+  map_dfr(timepoints, function(t) {
+    res <- results(x$dds, contrast = c("timepoint", t, "0"))[ids, ]
+    data.frame(dataset = name, species = x$species, gene = names(ids), hours = as.numeric(t),
+               log2FoldChange = res$log2FoldChange, padj = res$padj)
+  })
+})
+
+# 0h as the start of every line; A1 differentiation only
+culture_lfc <- culture_lfc %>%
+  bind_rows(distinct(culture_lfc, dataset, species, gene) %>% mutate(hours = 0, log2FoldChange = 0, padj = NA)) %>%
+  filter(!(dataset == "A1" & hours > 120))
+
+write.csv(culture_lfc, file.path(data_dir, "culture_lfc.csv"), row.names = FALSE)
+```
+
+
+Fig. 6A: two immortalised human myoblast lines, AB1167 and AB678, differentiating for 0-120h (Donega et al. 2025, GSE287954; n = 3). GEO has only the transcript counts of the authors' StringTie assembly: summed to genes (Ensembl transcripts by the GENCODE table, (coverage estimates); a gene is therefore tested only with at least 10 counts in every sample of a line. DESeq2 as above
+```{r data-human-myoblasts}
+
+donega_dir <- "revision/A1_sc_cross_species/ak2_isoforms"
+tx  <- data.table::fread(file.path(donega_dir, "context/donega/GSE287954_raw_counts_All_Samples.txt.gz"))
+ann <- data.table::fread(file.path(donega_dir, "annotation/tx_annotation_human.tsv.gz"))
+sq  <- data.table::fread(file.path(donega_dir, "annotation/donega_sqanti_isoforms.tsv.gz"))
+
+gene_by_gencode <- ann$gene_name[match(sub("[.].*", "", tx$transcript_id), ann$tx_id)] # Ensembl IDs without the version
+gene_by_sqanti <- sq$associated_gene[match(tx$transcript_id, sq$isoform)]
+tx_gene <- coalesce(gene_by_gencode, gene_by_sqanti)
+
+tx_counts <- as.matrix(tx[, -1])
+tx_counts[is.na(tx_counts)] <- 0
+annotated <- !is.na(tx_gene)
+donega_counts <- rowsum(tx_counts[annotated, ], group = tx_gene[annotated])
+donega_counts <- round(donega_counts)
+colnames(donega_counts) <- sub("_Run_1$", "", colnames(donega_counts)) # sample names look like 1167_24h_2
+
+human_genes <- c(HIF2A = "EPAS1", HIF3A = "HIF3A", PPARGC1A = "PPARGC1A", SERPINE1 = "SERPINE1")
+
+donega_lfc <- map_dfr(c("1167", "678"), function(line) {
+  counts <- donega_counts[, startsWith(colnames(donega_counts), paste0(line, "_"))]
+  hours <- as.numeric(sub(".*_([0-9]+)h_.*", "\\1", colnames(counts)))
+  samples <- data.frame(timepoint = factor(hours), row.names = colnames(counts))
+  counts <- counts[rowSums(counts >= 10) == ncol(counts), ] # at least 10 counts in every sample
+  dds <- DESeqDataSetFromMatrix(counts, colData = samples, design = ~ timepoint)
+  dds <- DESeq(dds)
+  ids <- human_genes[human_genes %in% rownames(dds)]
+  map_dfr(setdiff(levels(dds$timepoint), "0"), function(t) {
+    res <- results(dds, contrast = c("timepoint", t, "0"))[ids, ]
+    data.frame(dataset = paste0("AB", line), species = paste0("Human AB", line, " (Donega 2025)"), gene = names(ids),
+               hours = as.numeric(t), log2FoldChange = res$log2FoldChange, padj = res$padj)
+  })
+})
+
+# 0h as the start of every line
+donega_lfc <- donega_lfc %>%
+  bind_rows(distinct(donega_lfc, dataset, species, gene) %>% mutate(hours = 0, log2FoldChange = 0, padj = NA))
+
+# Not detected (fewer than 10 counts in a sample), as in the Methods
+setdiff(names(human_genes), donega_lfc$gene[donega_lfc$dataset == "AB1167"]) # HIF3A, PPARGC1A
+setdiff(names(human_genes), donega_lfc$gene[donega_lfc$dataset == "AB678"]) # HIF3A, PPARGC1A
+
+write.csv(donega_lfc, file.path(data_dir, "human_myoblast_lfc.csv"), row.names = FALSE)
+```
+
+
+Fig. 6A: KD3 human myoblasts (Zeng et al. 2016, GSE79920), single-nucleus TPM: myoblast nuclei (0h) and myotube nuclei after 72h of differentiation. log2 fold change of the mean expression (pseudocount 1), not tested, as all nuclei come from one culture. A gene is shown when detected in at least 10 % of the nuclei of either group
+```{r data-human-nuclei}
+
+kd3 <- data.table::fread("revision/A1_sc_cross_species/mammalian_sc_data/Human_KD3_Zeng2016/GSE79920_merged_TPM_with_genename_and_pseudocount_with_genetype.txt.gz")
+kd3_symbols <- sapply(strsplit(kd3$Gene, ":"), `[`, 2) # Gene is "Ensembl ID:symbol:type"
+kd3 <- data.frame(kd3[, -1], row.names = make.unique(kd3_symbols)) - 0.1 # the table adds 0.1 to every value
+kd3 <- kd3[, grepl("myoblast_nucleus|myotube_nucleus", colnames(kd3))]
+kd3_hours <- ifelse(grepl("myotube", colnames(kd3)), 72, 0)
+
+kd3_lfc <- map_dfr(names(human_genes), function(gene) {
+  expr <- unlist(kd3[human_genes[[gene]], ])
+  data.frame(dataset = "KD3", species = "Human KD3, nuclei (Zeng 2016)", gene = gene, hours = c(0, 72),
+             mean = tapply(expr, kd3_hours, mean), detected = tapply(expr > 0, kd3_hours, mean))
+}) %>%
+  group_by(gene) %>%
+  mutate(log2FoldChange = log2((mean + 1) / (mean[hours == 0] + 1)), padj = NA) %>%
+  filter(max(detected) >= 0.1) %>%
+  ungroup()
+
+kd3_lfc # HIF2A: LFC 5.3 (Results)
+
+write.csv(kd3_lfc, file.path(data_dir, "human_nuclei_lfc.csv"), row.names = FALSE)
+```
+
+Fig. 6B: MuSCs, myoblasts and myonuclei of mouse hindlimb muscle at E14.5, E18.5, P5 and adult (Dos Santos et al. 2023, GSE211543), processed following the published methods in in_vivo_mouse_muscle_development/dossantos_multiome.Rmd. Only the Fig. 6 genes are kept
+```{r data-mouse-development}
+myogenic <- readRDS("in_vivo_mouse_muscle_development/data/myogenic_rna.rds")
+b_genes <- mouse_symbol(union(c(fig6_genes, b_myogenesis, b_tgfb), umap_genes))
+myogenic <- DietSeurat(myogenic, layers = "data", features = b_genes, dimreducs = "myogenic.umap")
+myogenic$group <- ifelse(myogenic$cell_type == "Myonuclei", paste("Myonuclei", myogenic$stage), myogenic$cell_type)
+
+saveRDS(myogenic, file.path(data_dir, "mouse_myogenic.rds"))
+```
+
+Motif activity (chromVAR z) shown under the RNA of each pathway, motifs chosen from the literature:
+ - Energy metabolism: ERRa and PPARd, the partners through which PGC-1a (it binds no DNA itself) drives oxidative genes and slow fibres in muscle (Mootha et al. 2004; Wang et al. 2004)
+ - TGFb: SMAD3, the SMAD of the TGFb branch. 
+ - Myogenesis: MYOD1 and MYOG, under their RNA
+ - Hypoxia: HIF1A and HIF2A (EPAS1), one motif per HIF, each derived from ChIP-seq of the factor.
+```{r data-mouse-development-2}
+
+motif_pathway <- c("ESRRA.MA0592.4" = "Energy metabolism", "PPARD.MA1550.2" = "Energy metabolism",
+                   "SMAD3.MA0795.1" = "TGFβ",
+                   "MYOD1.MA0499.3" = "Myogenesis", "MYOG.MA0500.3" = "Myogenesis",
+                   "HIF1A.MA1106.2" = "Hypoxia", "EPAS1.MA2325.1" = "Hypoxia")
+motifs <- readRDS("in_vivo_mouse_muscle_development/data/myogenic_motifs.rds")
+motif_z <- motifs[names(motif_pathway), colnames(myogenic)] # motifs x the nuclei of myogenic
+
+saveRDS(list(z = motif_z, pathway = motif_pathway), file.path(data_dir, "mouse_myogenic_motifs.rds"))
+```
+
+Fig. 6E: N. viridescens 18 dpa limb blastema, Smart-seq2 (Subramanian et al. 2023, PRJNA904299), processed in in_vivo_newt_regeneration/notophthalmus_sc.Rmd. Only the Fig. 6 genes are kept, with the cell metadata
+```{r data-blastema}
+
+blastema <- readRDS("in_vivo_newt_regeneration/data/notophthalmus_sc/blastema_18dpa.rds")
+blastema <- DietSeurat(blastema, layers = "data", features = intersect(fig6_genes, rownames(blastema)), dimreducs = NULL)
+
+saveRDS(blastema, file.path(data_dir, "blastema_18dpa_genes.rds"))
+```
+
+Fig. 6C, D: early dedifferentiation in vitro (A1, 128/144/168h vs 120h, the IPA input table) and limb regeneration in vivo (P. waltl forelimb, 3/7 dpa vs 0 dpa: Elewa et al. 2017 libraries, DESeq2 results from Yassouf et al. 2025)
+
+A1: the copies plotted in Figs. 2F, 4 and 5 (and the "HIF3A" of Fig. 5A-C); every other gene takes its highest expressed copy
+```{r data-regeneration}
+
+a1_copies <- c("HIF3A" = "HIF3A", "EPAS1.3" = "EPAS1", "HIF1A" = "HIF1A", "EGLN3" = "EGLN3", "PPARGC1A.1" = "PPARGC1A",
+               "BHLHE40" = "BHLHE40", "SPRY1" = "SPRY1", "VEGFA.1" = "VEGFA", "LDHA" = "LDHA", "pkm.3" = "PKM",
+               "TGFB1.1" = "TGFB1", "fn1.1" = "FN1", "SMAD7" = "SMAD7", "BAMBI" = "BAMBI", "pmepa1" = "PMEPA1", "pax3" = "PAX3")
+
+ipa <- read.csv("IPA_data/IPA Results Dediff.csv") %>%
+  mutate(base = toupper(sub("\\.[0-9]+$", "", SYMBOL))) # symbol without the copy number
+
+a1_plotted_copies <- ipa %>%
+  filter(SYMBOL %in% names(a1_copies)) %>%
+  group_by(SYMBOL) %>%
+  slice_max(baseMean_128_vs_120, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(gene = a1_copies[SYMBOL])
+
+a1_highest_copies <- ipa %>%
+  filter(base %in% setdiff(fig6_genes, a1_copies)) %>%
+  group_by(base) %>%
+  slice_max(baseMean_128_vs_120, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(gene = base)
+
+in_vitro <- bind_rows(a1_plotted_copies, a1_highest_copies) %>%
+  dplyr::select(gene, starts_with("log2FoldChange"), starts_with("padj")) %>%
+  pivot_longer(cols = -gene, names_to = c(".value", "contrast"), names_pattern = "(log2FoldChange|padj)_(.*)") %>%
+  mutate(column = sub("_vs_120", "h", contrast), dataset = "A1 in vitro\n(vs 120h)") %>%
+  dplyr::select(-contrast)
+
+# MYOG is missing from the A1 transcriptome above. It comes from the same samples realigned to the Sandberg N. viridescens
+# transcriptome (MYOG = comp799573_c0_seq1, see sandberg_reference_realigned_bulk/): 120-168h, DESeq2 with apeglm shrinkage vs 120h
+sandberg_dir <- "sandberg_reference_realigned_bulk/salmon_MT_quant_Sandberg_reference"
+sandberg_samples <- read.delim(file.path(sandberg_dir, "samples.txt")) %>%
+  filter(timepoint >= 120) %>%
+  mutate(timepoint = relevel(factor(timepoint), ref = "120"))
+sandberg_txi <- tximport(file.path(sandberg_dir, sandberg_samples$filename), type = "salmon", tx2gene = read.csv(file.path(sandberg_dir, "tx2gene.csv")))
+sandberg_dds <- DESeqDataSetFromTximport(sandberg_txi, colData = sandberg_samples, design = ~ timepoint)
+sandberg_dds <- DESeq(sandberg_dds[rowSums(counts(sandberg_dds) >= 10) >= 3, ])
+
+a1_myog <- map_dfr(c("128", "144", "168"), function(t) {
+  res <- lfcShrink(sandberg_dds, coef = paste0("timepoint_", t, "_vs_120"), type = "apeglm")["comp799573_c0_seq1", ]
+  tibble(gene = "MYOG", log2FoldChange = res$log2FoldChange, padj = res$padj, column = paste0(t, "h"), dataset = "A1 in vitro\n(vs 120h)")
+})
+in_vitro <- bind_rows(in_vitro, a1_myog)
+
+limb_file <- "in_vivo_newt_regeneration/data/pleurodeles_bulk/Limb_DEG.xlsx"
+in_vivo <- bind_rows(
+  read_excel(limb_file, sheet = "3dpavs0dpa_DE", na = "NA") %>% mutate(column = "3 dpa"),
+  read_excel(limb_file, sheet = "7dpavs0dpa_DE", na = "NA") %>% mutate(column = "7 dpa")
+) %>%
+  mutate(gene = toupper(gene)) %>%
+  filter(gene %in% fig6_genes) %>%
+  transmute(gene, log2FoldChange, padj, column, dataset = "P. waltl limb\n(vs 0 dpa)")
+
+regeneration_lfc <- bind_rows(in_vitro, in_vivo) %>%
+  mutate(gene = label_gene(gene))
+
+write.csv(regeneration_lfc, file.path(data_dir, "regeneration_lfc.csv"), row.names = FALSE)
+```
+
+
+# Panels
+
+```{r panel-a}
+# Fig. 6A: in vitro differentiation, PPARGC1A, SERPINE1, HIF2A and HIF3A in newt, mouse and human myogenic cultures, matched by time
+culture_colours <- c("Newt A1 (this study)" = "#FF7F00", "Mouse C2C12 (Denes 2019)" = "#2166AC",
+                     "Human AB1167 (Donega 2025)" = "#1B7837", "Human AB678 (Donega 2025)" = "#7FBC41",
+                     "Human KD3, nuclei (Zeng 2016)" = "#C51B7D")
+
+culture_lfc <- bind_rows(read.csv(file.path(data_dir, "culture_lfc.csv")),
+                         read.csv(file.path(data_dir, "human_myoblast_lfc.csv")),
+                         read.csv(file.path(data_dir, "human_nuclei_lfc.csv")))
+
+# Genes below the filter of a dataset, listed at the bottom of the gene's panel: HIF3A in C2C12, AB1167, AB678 and KD3, PPARGC1A in
+# AB1167 and AB678 (Results)
+not_detected <- expand_grid(dataset = unique(culture_lfc$dataset), gene = names(ae_pathway)) %>%
+  anti_join(culture_lfc, by = c("dataset", "gene")) %>%
+  group_by(gene) %>%
+  summarise(label = paste0("Not detected:\n", str_wrap(paste(dataset, collapse = ", "), width = 20)))
+not_detected
+
+not_detected <- in_ae_order(not_detected)
+culture_lfc <- in_ae_order(culture_lfc) %>%
+  mutate(species = factor(species, levels = names(culture_colours)),
+         test = case_when(dataset == "KD3" ~ "single nuclei, not tested", padj < 0.05 ~ "padj < 0.05", TRUE ~ "ns"))
+
+panel_a <- ggplot(culture_lfc, aes(hours, log2FoldChange, colour = species, group = dataset)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+  geom_line(linewidth = 0.6) +
+  geom_point(aes(shape = test), size = 1.3, fill = "white") +
+  geom_text(data = not_detected, aes(x = 84, y = -Inf, label = label), vjust = -0.3, size = 1.9, colour = "grey30", lineheight = 0.9,
+            inherit.aes = FALSE) +
+  ggh4x::facet_nested_wrap(~ pathway + gene, nrow = 1, scales = "free_y", strip = ae_strips, nest_line = element_line(colour = "grey50"),
+                           solo_line = TRUE) +
+  scale_x_continuous(breaks = c(0, 72, 120, 168)) +
+  scale_y_continuous(expand = expansion(mult = c(0.3, 0.05))) + # room for the note
+  # legend in two columns, newt and mouse left, human right: an empty key fills the third row on the left
+  scale_colour_manual(values = c(culture_colours, " " = "transparent"), limits = c(names(culture_colours)[1:2], " ", names(culture_colours)[3:5]),
+                      name = NULL) +
+  scale_shape_manual(values = c("padj < 0.05" = 16, "ns" = 21, "single nuclei, not tested" = 17), name = NULL) +
+  labs(title = "In vitro: myogenic differentiation", x = "Hours of differentiation", y = "log2 FC vs 0h") +
+  theme_fig +
+  theme(legend.position = "bottom", legend.box = "vertical",
+        legend.margin = margin(0, 0, 0, 0), legend.spacing.y = unit(0, "mm"),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3)) +
+  guides(colour = guide_legend(order = 1, nrow = 3), shape = guide_legend(order = 2))
+
+panel_a
+
+ggsave(file.path(plot_dir, "A_culture_differentiation.png"), panel_a, width = 105, height = 82, units = "mm", dpi = 600, bg = "white")
+```
+
+# Fig. 6B: mouse hindlimb muscle development in vivo, laid out as Dos Santos et al. Fig. 2: UMAP of the myogenic nuclei and of selected genes (left), genes per group as the dot plot in E, with motif activity (right)
+```{r panel-b}
+
+myogenic <- readRDS(file.path(data_dir, "mouse_myogenic.rds"))
+groups <- c("MuSCs", "Myoblasts", "Myonuclei E14.5", "Myonuclei E18.5", "Myonuclei P5", "Myonuclei Adult")
+
+group_colours <- setNames(c("#2C7FB8", "#1B9E77", "#FEC44F", "#FD8D3C", "#E31A1C", "#800026"), groups)
+myogenic$group <- factor(myogenic$group, levels = groups)
+
+umap_coordinates <- Embeddings(myogenic, reduction = "myogenic.umap")
+umap_expression <- t(as.matrix(GetAssayData(myogenic, layer = "data")[mouse_symbol(umap_genes), ])) # nuclei x Ppargc1a, Epas1
+umap <- data.frame(umap_1 = umap_coordinates[, 1], umap_2 = umap_coordinates[, 2], group = myogenic$group, umap_expression,
+                   check.names = FALSE)
+umap_theme <- list(coord_equal(), # UMAP shapes undistorted
+                   theme_void() + theme(plot.title = element_text(size = 5.4, hjust = 0.5, face = "bold"), legend.position = "none",
+                                        plot.margin = margin(1, 1, 1, 1)))
+
+umap_groups <- ggplot(umap, aes(umap_1, umap_2, colour = group)) +
+  geom_point(size = 0.06) +
+  scale_colour_manual(values = group_colours) +
+  labs(title = "Myogenic nuclei") +
+  umap_theme
+
+# Expressing nuclei drawn last, on top
+umap_markers <- lapply(umap_genes, function(gene) {
+  ggplot(arrange(umap, .data[[mouse_symbol(gene)]]), aes(umap_1, umap_2, colour = .data[[mouse_symbol(gene)]])) +
+    geom_point(size = 0.04) +
+    scale_colour_viridis_c() +
+    labs(title = sub(" ", "\n", label_gene(gene))) + # HIF2A (EPAS1) on two lines
+    umap_theme
+})
+umap_key <- ggplot(data.frame(x = seq(0, 1, length.out = 50)), aes(x, 1, fill = x)) +
+  geom_raster() +
+  annotate("text", x = c(0, 1), y = 0.2, label = c("low", "high"), size = 1.9, vjust = 1) +
+  scale_fill_viridis_c() +
+  coord_cartesian(ylim = c(-0.6, 1.5), clip = "off") +
+  theme_void() + theme(legend.position = "none", plot.margin = margin(1, 2, 1, 2, "mm"))
+
+# Groups on top of the dot plot as a colour bar, named in a two-row key above it (also the key of the group UMAP): MuSCs and
+# myoblasts on the left, the myonuclei stages on the right. 
+key <- data.frame(group = groups, x = c(-4.7, -4.7, -1.7, -1.7, 2.55, 2.55), y = c(3.9, 2.7, 3.9, 2.7, 3.9, 2.7))
+group_bar <- ggplot(data.frame(id = factor(groups, levels = groups)), aes(id, 1, fill = id)) +
+  geom_tile(width = 0.9) + # one block per dot column, gaps as between the motif squares
+  geom_point(data = key, aes(x, y, fill = group), shape = 22, size = 1.8, stroke = 0, inherit.aes = FALSE) +
+  geom_text(data = key, aes(x + 0.3, y, label = group), size = 1.9, hjust = 0, inherit.aes = FALSE) +
+  scale_fill_manual(values = group_colours) +
+  coord_cartesian(xlim = c(0.4, 6.6), ylim = c(0.5, 4.5), expand = FALSE, clip = "off") +
+  theme_void() + theme(legend.position = "none")
+
+# Dot plot genes
+b_left_out <- c("FN1", "TIMP3", "LDHA", "PKM", "EGLN3", "SPRY1")
+b_dot_genes <- union(setdiff(fig6_genes, b_left_out), c(b_myogenesis, b_tgfb))
+
+dots <- DotPlot(myogenic, features = mouse_symbol(b_dot_genes), group.by = "group")$data %>%
+  group_by(features.plot) %>%
+  filter(max(pct.exp) >= 10) %>%
+  ungroup() %>%
+  mutate(gene = toupper(features.plot),
+         group = factor(case_when(gene %in% b_myogenesis ~ "Myogenesis", gene %in% b_tgfb ~ "TGFβ", TRUE ~ as.character(gene_group(gene))), levels = names(gene_groups)),
+         gene = label_gene(gene))
+
+# Motif activity under the RNA of its pathway: mean chromVAR z of all nuclei per group, one tile per dot column, the z-score printed in it.
+# Two viridis scales, each over its own range: the MyoD and myogenin E-boxes (z up to 3) would otherwise take up the whole range and hide the rise of the ERRa and PPARd motifs; the HIF motifs share the scale of ERRa and PPARd, so their small differences are not stretched
+motifs <- readRDS(file.path(data_dir, "mouse_myogenic_motifs.rds"))
+motif_label <- paste(sub("[.].*", "", names(motifs$pathway)), "motif") # ESRRA.MA0592.4 -> ESRRA motif
+motif_means <- sapply(groups, function(g) rowMeans(motifs$z[, myogenic$group == g, drop = FALSE])) # motifs x groups
+tiles <- data.frame(gene = rep(motif_label, times = length(groups)),
+                    group = factor(rep(motifs$pathway, times = length(groups)), levels = names(gene_groups)),
+                    id = factor(rep(groups, each = length(motif_label)), levels = groups),
+                    z = as.vector(motif_means))
+
+# Tile colour on the scale of the motif, white text on the darker half of each scale
+tiles <- tiles %>%
+  mutate(scale = ifelse(gene %in% c("MYOD1 motif", "MYOG motif"), "myogenic", "other")) %>%
+  group_by(scale) %>%
+  mutate(fill = scales::col_numeric(palette = viridisLite::viridis(256), domain = range(z))(z),
+         dark = z < mean(range(z))) %>%
+  ungroup() %>%
+  mutate(label = sprintf("%.1f", round(z, 1) + 0)) # + 0 turns -0 into 0
+
+# Rows: the genes of each pathway, then its motifs, separated by a dashed line. SERPINE1 (A, D) and PAX3 (C, E) get an empty row:
+# not detected in vivo (at most 1 % and 4 % of nuclei)
+b_not_detected <- c(SERPINE1 = "TGFβ", PAX3 = "Myogenesis")
+b_gene_order <- label_gene(union(fig6_genes, c(b_myogenesis, b_tgfb)))
+rows <- c()
+for (pathway in names(gene_groups)) {
+  rows <- c(rows,
+            intersect(b_gene_order, dots$gene[dots$group == pathway]),
+            names(b_not_detected)[b_not_detected == pathway],
+            motif_label[motifs$pathway == pathway])
+}
+dots$gene <- factor(dots$gene, levels = rev(rows))
+tiles$gene <- factor(tiles$gene, levels = rev(rows))
+not_detected <- data.frame(gene = factor(names(b_not_detected), levels = rev(rows)),
+                           group = factor(b_not_detected, levels = names(gene_groups)))
+
+# The dashed line sits above the motif rows, the bottom rows of their pathway
+motif_pathways <- unique(motifs$pathway)
+separators <- data.frame(group = factor(motif_pathways, levels = names(gene_groups)),
+                         y = as.vector(table(factor(motifs$pathway, levels = motif_pathways))) + 0.5)
+
+panel_dots <- ggplot(dots, aes(id, gene)) +
+  geom_tile(data = tiles, aes(fill = fill), width = 0.9, height = 0.9) +
+  geom_text(data = subset(tiles, dark), aes(label = label), size = 1.7, colour = "white") +
+  geom_text(data = subset(tiles, !dark), aes(label = label), size = 1.7, colour = "black") +
+  geom_point(aes(size = pct.exp, colour = avg.exp.scaled)) +
+  geom_hline(data = separators, aes(yintercept = y), linetype = "dashed", colour = "grey50", linewidth = 0.25) +
+  geom_text(data = not_detected, aes(x = 3.5, y = gene), label = "not detected", size = 1.9, colour = "grey40", fontface = "italic") +
+  facet_grid(group ~ ., scales = "free_y", space = "free_y", switch = "y", labeller = label_wrap_gen(10)) +
+  scale_colour_gradientn(colours = bubble_colours, breaks = c(-1, 0, 1)) +
+  scale_fill_identity() + # tile colours set above
+  scale_radius(range = c(0, 3.3), limits = c(0, 100), breaks = c(25, 50, 75)) +
+  labs(x = NULL, y = NULL) +
+  theme_fig + theme_groups +
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(size = 5.8), legend.position = "none", # keys described in the legend
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3))
+
+# UMAPs one beneath the other at the same size, the colour key below them; the group bar with its key and the RNA and motif plot
+# on the right. The UMAP column is just wide enough for the UMAPs (limited by height), the rest of the width goes to the dot plot.
+# The dot plot column is not aligned with the top of the UMAP column (free, side "t"), so it starts right under the title and uses the full height
+umap_column <- umap_groups / umap_markers[[1]] / umap_markers[[2]] / umap_key + plot_layout(heights = c(1, 1, 1, 0.13))
+dots_column <- group_bar / panel_dots + plot_layout(heights = c(0.16, 1.5))
+panel_b <- (umap_column | free(dots_column, side = "t")) +
+  plot_layout(widths = c(0.4, 0.6)) +
+  plot_annotation(title = expression(bold("In vivo: mouse hindlimb muscle development ") * scriptstyle("(Dos Santos 2023)")),
+                  theme = theme(plot.title = element_text(size = 7.5, hjust = 0.5), plot.margin = margin(1, 1, 1, 1)))
+
+panel_b
+
+ggsave(file.path(plot_dir, "B_mouse_development.png"), panel_b, width = 86, height = 82, units = "mm", dpi = 600, bg = "white")
+```
+
+```{r panel-c}
+# Fig. 6C: early dedifferentiation in vitro next to limb regeneration in vivo: log2 FC tiles, genes grouped and ordered as in B and E,
+# stars = padj, colours capped at +-3
+regeneration_lfc <- read.csv(file.path(data_dir, "regeneration_lfc.csv")) %>%
+  mutate(column = factor(column, levels = c("128h", "144h", "168h", "3 dpa", "7 dpa")),
+         stars = case_when(padj < 0.001 ~ "***", padj < 0.01 ~ "**", padj < 0.05 ~ "*", TRUE ~ ""))
+
+
+not_detected <- expand_grid(gene = gene_groups$Myogenesis, dataset = unique(regeneration_lfc$dataset)) %>%
+  anti_join(regeneration_lfc, by = c("gene", "dataset")) %>%
+  mutate(column = ifelse(grepl("A1", dataset), "144h", "3 dpa"),
+         stars = "",
+         middle = ifelse(grepl("A1", dataset), 2, 1.5)) # x of the text: the middle of the dataset's columns
+
+lfc_tiles <- bind_rows(regeneration_lfc, not_detected) %>%
+  mutate(column = factor(column, levels = levels(regeneration_lfc$column)),
+         group = gene_group(gene),
+         gene = factor(gene, levels = rev(label_gene(fig6_genes))))
+
+panel_c <- ggplot(lfc_tiles, aes(column, gene, fill = log2FoldChange)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = stars), size = 1.8, vjust = 0.75) +
+  geom_text(data = filter(lfc_tiles, !is.na(middle)), aes(middle, gene), label = "not detected", size = 1.8, colour = "grey40", fontface = "italic",
+            inherit.aes = FALSE) +
+  facet_grid(group ~ dataset, scales = "free", space = "free", switch = "y", labeller = labeller(group = label_wrap_gen(10))) +
+  scale_fill_gradientn(colours = heat_colours, limits = c(-3, 3), oob = scales::squish, na.value = "white", name = "log2 FC") +
+  labs(title = "Dedifferentiation and regeneration", x = NULL, y = NULL) +
+  theme_fig + theme_groups +
+  # colour key in the empty top-left corner (left of the column strips), so the rows get the height of a bottom legend
+  theme(strip.text.x = element_text(size = 6, face = "bold"), axis.text.x = element_text(size = 5.8), axis.text.y = element_text(size = 6),
+        legend.position = "inside", legend.position.inside = c(0, 1), legend.justification.inside = c(1, 0), legend.direction = "horizontal",
+        legend.margin = margin(0, 2, 2, 0), plot.margin = margin(5.5, 5.5, 1, 5.5)) +
+  guides(fill = guide_colourbar(barwidth = unit(18, "mm"), barheight = unit(2, "mm"), title.vjust = 0.9))
+
+panel_c
+
+ggsave(file.path(plot_dir, "C_regeneration_heatmap.png"), panel_c, width = 68, height = 93.86, units = "mm", dpi = 600, bg = "white")
+```
+# Fig. 6D: PPARGC1A, SERPINE1, HIF2A and HIF3A from C over time: A1 myotubes after serum re-addition (128/144/168h vs 120h, in days) and the P. waltl limb after amputation (3/7 dpa vs 0 dpa)
+```{r panel-d}
+
+timecourse <- read.csv(file.path(data_dir, "regeneration_lfc.csv")) %>%
+  filter(gene %in% c("HIF2A (EPAS1)", "HIF3A", "PPARGC1A", "SERPINE1")) %>%
+  mutate(days = c("128h" = 1 / 3, "144h" = 1, "168h" = 2, "3 dpa" = 3, "7 dpa" = 7)[column],
+         series = ifelse(grepl("A1", dataset), "Newt A1 myotubes, serum re-addition (vs 120h)", "P. waltl limb, amputation (vs 0 dpa)"))
+
+# Day 0 as the start of every line
+timecourse <- timecourse %>%
+  bind_rows(distinct(timecourse, gene, series) %>% mutate(days = 0, log2FoldChange = 0, padj = NA)) %>%
+  mutate(gene = sub(" .*", "", gene), # HIF2A (EPAS1) -> HIF2A
+         sig = !is.na(padj) & padj < 0.05) %>%
+  in_ae_order()
+
+panel_d <- ggplot(timecourse, aes(days, log2FoldChange, colour = series)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+  geom_line(linewidth = 0.7) +
+  geom_point(aes(shape = sig), size = 1.5, fill = "white") +
+  ggh4x::facet_nested(pathway + gene ~ ., scales = "free_y", strip = ae_strips, labeller = labeller(pathway = label_wrap_gen(10)),
+                      nest_line = element_line(colour = "grey50"), solo_line = TRUE) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 2, 3, 7)) +
+  scale_y_continuous(breaks = scales::breaks_extended(n = 3)) +
+  scale_colour_manual(values = c("Newt A1 myotubes, serum re-addition (vs 120h)" = "#FF7F00", "P. waltl limb, amputation (vs 0 dpa)" = "#984EA3"),
+                      name = NULL) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), labels = c(`TRUE` = "padj < 0.05", `FALSE` = "ns"), name = NULL) +
+  labs(title = "Time course", x = "Days after serum re-addition or amputation", y = "log2 FC vs before") +
+  theme_fig +
+  theme(legend.position = "bottom", legend.box = "vertical", legend.margin = margin(0, 0, 0, 0), legend.spacing.y = unit(0, "mm"),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3)) +
+  guides(colour = guide_legend(ncol = 1, order = 1), shape = guide_legend(order = 2))
+
+panel_d
+
+ggsave(file.path(plot_dir, "D_hif_timecourse.png"), panel_d, width = 60, height = 93.86, units = "mm", dpi = 600, bg = "white")
+```
+
+Fig. 6E: newt limb blastema (N. viridescens, 18 dpa), genes per cell type, grouped and ordered as in C, Fig. 1 colours.
+Kiloscripts only (> 1,500 detected genes, median ~155,000 counts). Cell types with >= 15 Kiloscripts
+```{r panel-e}
+
+blastema <- readRDS(file.path(data_dir, "blastema_18dpa_genes.rds"))
+cell_types <- c("mesenchyme IL11+", "mesenchyme", "chondrogenic", "epidermis", "macrophages")
+blastema <- subset(blastema, subset = population == "Kiloscript" & cell_type %in% cell_types)
+blastema$cell_type <- factor(blastema$cell_type, levels = cell_types,
+                             labels = c("Mesenchyme IL11+", "Mesenchyme", "Chondrogenic", "Epidermis", "Macrophages"))
+table(blastema$cell_type) # 83, 190, 35, 17, 34: n = 359 (legend)
+
+# Genes detected in fewer than 5 % of cells in every cell type are left out
+dots <- DotPlot(blastema, features = intersect(fig6_genes, rownames(blastema)), group.by = "cell_type")$data %>%
+  group_by(features.plot) %>%
+  filter(max(pct.exp) >= 5) %>%
+  ungroup() %>%
+  mutate(group = gene_group(features.plot),
+         gene = factor(label_gene(features.plot), levels = rev(label_gene(fig6_genes))))
+
+# The myogenic genes get an empty row where they are absent from the annotation or below 5 %
+e_not_detected <- setdiff(gene_groups$Myogenesis, as.character(dots$gene))
+not_detected <- data.frame(gene = factor(e_not_detected, levels = levels(dots$gene)), group = gene_group(e_not_detected))
+
+panel_e <- ggplot(dots, aes(id, gene, size = pct.exp, colour = avg.exp.scaled)) +
+  geom_point() +
+  geom_text(data = not_detected, aes(x = 3, y = gene), label = "not detected", size = 1.9, colour = "grey40", fontface = "italic",
+            inherit.aes = FALSE) +
+  facet_grid(group ~ ., scales = "free_y", space = "free_y", switch = "y", labeller = label_wrap_gen(10)) +
+  scale_colour_gradientn(colours = bubble_colours, breaks = c(-1, 0, 1)) +
+  scale_radius(range = c(0, 2.6), limits = c(0, 100), breaks = c(25, 50, 75, 100)) +
+  labs(title = "Newt limb blastema, 18 dpa", x = NULL, y = NULL) +
+  theme_fig + theme_groups +
+  # keys in the empty bottom-left corner (below the gene names, left of the cell type labels), so the dot columns get their width
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.text.y = element_text(size = 6.5),
+        legend.position = "inside", legend.position.inside = c(0, 0), legend.justification.inside = c(1, 1), legend.box = "horizontal",
+        legend.box.just = "top", legend.margin = margin(2, 4, 0, 0), legend.title = element_text(size = 6), plot.margin = margin(5.5, 5.5, 1, 5.5),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3)) +
+  guides(colour = guide_colourbar("expression", barwidth = unit(2, "mm"), barheight = unit(12, "mm"), order = 1),
+         size = guide_legend("proportion", order = 2))
+
+panel_e
+
+ggsave(file.path(plot_dir, "E_blastema_dotplot.png"), panel_e, width = 60, height = 93.86, units = "mm", dpi = 600, bg = "white")
+```
+
+# END
