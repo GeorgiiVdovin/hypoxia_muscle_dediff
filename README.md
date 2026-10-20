@@ -53,7 +53,7 @@ development (GSE211543, Dos Santos et al., 2023), N. viridescens 18 dpa limb bla
 and P. waltl limb regeneration (Elewa et al., 2017; DESeq2 results from Yassouf et al., 2025, figshare
 10.6084/m9.figshare.22748393). The Donega transcripts are mapped to genes with the GENCODE v50 annotation and the authors'
 SQANTI table (their Supplementary Data 6). The C2C12 sample sheet is
-`revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3/GSE148667_metadata.csv`.
+`A1_cross_species_comparisons/GSE148667_metadata.csv`.
 
 `in_vivo_mouse_muscle_development/dossantos_multiome.Rmd` - mouse hindlimb muscle 10x multiome (E14.5, E18.5, P5, adult;
 Dos Santos et al., 2023, GSE211543, deposited Cell Ranger ARC matrices), processed following the authors' script: QC,

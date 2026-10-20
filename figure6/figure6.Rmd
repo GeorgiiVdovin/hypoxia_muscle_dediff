@@ -94,7 +94,7 @@ newt_files <- setNames(file.path("salmon_MT_Katia_reference", newt_samples$filen
 newt_txi <- tximport(newt_files, type = "salmon", tx2gene = read.csv("salmon_MT_Katia_reference/tx2gene_nvir_katia.csv"))
 
 c2c12_dir <- "revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3"
-c2c12_samples <- read.csv(file.path(c2c12_dir, "GSE148667_metadata.csv")) %>%
+c2c12_samples <- read.csv("A1_cross_species_comparisons/GSE148667_metadata.csv") %>%
   mutate(timepoint = factor(differentiation_day * 24))
 rownames(c2c12_samples) <- c2c12_samples$Run
 c2c12_files <- setNames(file.path(c2c12_dir, "GSE148667_salmon", paste0(c2c12_samples$Run, ".tabular")), c2c12_samples$Run)

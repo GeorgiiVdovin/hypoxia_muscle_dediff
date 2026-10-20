@@ -57,6 +57,6 @@ renv/staging/
 !/figure6/data/mouse_myogenic_motifs.rds
 !/figure6/data/blastema_18dpa_genes.rds
 !/figure6/data/regeneration_lfc.csv
-!/revision/A1_sc_cross_species/mouse_differentiation_regeneration/GSE148667_C2C12_3/GSE148667_metadata.csv
+!/A1_cross_species_comparisons/GSE148667_metadata.csv
 !/in_vivo_mouse_muscle_development/dossantos_multiome.Rmd
 !/in_vivo_newt_regeneration/notophthalmus_sc.Rmd
