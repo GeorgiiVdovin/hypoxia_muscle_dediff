@@ -2,7 +2,7 @@
 
 Code behind the figures of the manuscript. Open `A1 Analysis.Rproj` (renv restores the packages from `renv.lock`).
 Every notebook sets the project root itself and runs top to bottom in a fresh R session. Plots are saved next to the
-code that makes them. ComplexHeatmap and circlize (Supp. Fig. 4A heatmap) are installed outside `renv.lock`.
+code that makes them.
 
 Raw sequencing data, quantification files and the Del-Tsonis transcriptome annotation are not in this repository
 (see Data availability in the paper). The Notophthalmus A1 single-cell and bulk data can be browsed at
