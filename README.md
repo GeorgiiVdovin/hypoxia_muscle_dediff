@@ -9,17 +9,17 @@ The Notophthalmus A1 single-cell and bulk data can be browsed at
 
 ## Figures and the code behind them
 
-| Panels | Code | Plot files |
-| --- | --- | --- |
-| Fig. 1A-C, Supp. Fig. 1A, C, D, 2A | `A1_single_cell_data/notebooks/a1_dge.Rmd` | in `A1_single_cell_data/plots`: 1A `Fig1A UMAP Clusters.png`, 1B `Fig1B Markers Dotplot.png`, 1C `Fig1C Marker Violins.png`, S1A `SuppFig1A Cluster Markers Heatmap_v2.png`, S1C `SuppFig1C Cluster GO BP_v2.png`, S1D `SuppFig1D Mapping Rate TE_v2.png`, S2A `SuppFig2A CC Phases per Cluster.png` |
-| Supp. Fig. 1B, Supplementary Table 1 | `A1_single_cell_data/notebooks/a1_monocle3.Rmd` | `A1_single_cell_data/plots/SuppFig1B Monocle3 Trajectory_v2.png`, `A1_single_cell_data/results/A1 Trajectory Genes.csv` |
-| Fig. 1D, E, Supp. Fig. 2B-E | `A1_cross_species_comparisons/top_tpm_*` | in each folder: 1D `Log2 Median TPM A1 Samples_v2.png`, 1E `Log2 Median TPM 3 C2C12 Samples_v2.png`, S2B `Log2 Median TPM A1 Samples_Supp_v2.png`, S2C `Log2 Median TPM 3 MuSC Samples_v2.png`, S2D `Log2 Median TPM 3 MEF Samples_v2.png`, S2E `Log2 Median TPM 4 Mouse VSMC Samples_v2.png` |
-| Fig. 2C, D, F, 3C, E-G, 4C-F, 5A-D, Supp. Fig. 3, Supp. Fig. 4B-F | `A1_diff_dediff.Rmd` (Fig. 2F Myf5, Myog and Myf6 from `sandberg_reference_realigned_bulk/sandberg_muscle_genes.Rmd`) | in the project root: 2C `MT PCA.png`, 2D `Cell Division GO Gene Set.png`, 2F `Muscle Differentiation_v2.png`, 3C `Tricarboxylic Acid Cycle GO Gene Set.png`, 3E `PPARGC1A_v2.png`, 3F `LDHA_v2.png`, 3G `PKM_v2.png`, 4C `BMP-SMAD's_v2.png`, 4D `TGFbeta-SMADs and Downstream Targets_v2.png`, 4E `Overlapping SMAD1 SMAD3_v2.png`, 4F `TGFbeta Signalling Inhibitors_v2.png`, 5A `HIF3A Volcano 8h Dediff 0.001_v2.png`, 5B `Hypoxic Signaling Genes_v2.png`, 5C `HIF3A_v2.png`, 5D `HIF2A_5D.png`, S3A `Top 20 Annotated Unique DEG 8h Dediff.png`, S3B `Cnetplot 0.001 Myotubes 8h Dediff GO BP.png`, S3C `Myotubes Single Clusters 0.001_v2.png`, S3D `0.001 Myotubes 8h Dediff GO BP_v2.png`, S4B `Volcano 8h Dediff 0.001_v2.png`, S4C `MMP GO Gene Set.png`, S4D `Electron Transport Chain GO Gene Set_v2.png`, S4E `HIF1B_v2.png`, S4F `EGLN2_v2.png` |
-| Fig. 3A, B, 5E, Supp. Fig. 4A | `IPA_data/IPA_LFC_0.5_p_0.001_plots/ipa_z-score_plots.Rmd` | in the same folder: 3A `TGF-β, BMP and p53 bar.png`, 3B `Metabolic Changes bar.png`, 5E `Cellular Response to Hypoxia bar.png`, S4A `Top 20 IPA Upstream Regulators.png` |
-| Statistics of Fig. 4G-I, 5F-H (Supplementary Table 2) | `logistic_regression/logit_link_myotubes.Rmd` | printed only |
-| Fig. 6A, C, D | `figure6/figure6.Rmd` | in `figure6/plots`: 6A `A_culture_differentiation.png`, 6C `C_regeneration_heatmap.png`, 6D `D_hif_timecourse.png` |
-| Fig. 6B | `figure6/figure6.Rmd`, data from `in_vivo_mouse_muscle_development/dossantos_multiome.Rmd` | `figure6/plots/B_mouse_development.png` |
-| Fig. 6E | `figure6/figure6.Rmd`, data from `in_vivo_newt_regeneration/notophthalmus_sc.Rmd` | `figure6/plots/E_blastema_dotplot.png` |
+| Panels | Code |
+| --- | --- |
+| Fig. 1A-C, Supp. Fig. 1A, C, D, 2A | `A1_single_cell_data/notebooks/a1_dge.Rmd` |
+| Supp. Fig. 1B, Supplementary Table 1 | `A1_single_cell_data/notebooks/a1_monocle3.Rmd` |
+| Fig. 1D, E, Supp. Fig. 2B-E | `A1_cross_species_comparisons/top_tpm_*` |
+| Fig. 2C, D, F, 3C, E-G, 4C-F, 5A-D, Supp. Fig. 3, Supp. Fig. 4B-F | `A1_diff_dediff.Rmd` (Fig. 2F Myf5, Myog and Myf6 from `sandberg_reference_realigned_bulk/sandberg_muscle_genes.Rmd`) |
+| Fig. 3A, B, 5E, Supp. Fig. 4A | `IPA_data/IPA_LFC_0.5_p_0.001_plots/ipa_z-score_plots.Rmd` |
+| Statistics of Fig. 4G-I, 5F-H (Supplementary Table 2) | `logistic_regression/logit_link_myotubes.Rmd` |
+| Fig. 6A, C, D | `figure6/figure6.Rmd` |
+| Fig. 6B | `figure6/figure6.Rmd`, data from `in_vivo_mouse_muscle_development/dossantos_multiome.Rmd` |
+| Fig. 6E | `figure6/figure6.Rmd`, data from `in_vivo_newt_regeneration/notophthalmus_sc.Rmd` |
 
 
 ## Folders and notebooks
