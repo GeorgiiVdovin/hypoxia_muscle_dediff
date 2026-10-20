@@ -1,11 +1,9 @@
-# Hypoxia inhibits newt skeletal muscle dedifferentiation
+# Hypoxia inhibits cell cycle re-entry of newt skeletal muscle
 
 Code behind the figures of the manuscript. Open `A1 Analysis.Rproj` (renv restores the packages from `renv.lock`).
-Every notebook sets the project root itself and runs top to bottom in a fresh R session. Plots are saved next to the
-code that makes them.
+Every notebook runs with paths relative to the project root. Plots are saved next to the code that makes them.
 
-Raw sequencing data, quantification files and the Del-Tsonis transcriptome annotation are not in this repository
-(see Data availability in the paper). The Notophthalmus A1 single-cell and bulk data can be browsed at
+The Notophthalmus A1 single-cell and bulk data can be browsed at
 [georgii-vdovin.shinyapps.io/nviridescens-a1-browser](https://georgii-vdovin.shinyapps.io/nviridescens-a1-browser/)
 ([code](https://github.com/GeorgiiVdovin/nviridescens-a1-browser)).
 
@@ -67,6 +65,8 @@ are summed over the peaks called in all four libraries. It writes the myogenic n
 single-cell data used in Fig. 6E.
 
 `Nvir_Annotations` - annotation of the Del-Tsonis transcriptome (Tsissios et al., 2023): mitochondrial genes for
-single-cell QC, blastp annotation against Swiss-Prot with GO terms, and the org.Nvi.eg.db package for clusterProfiler.
+single-cell QC, blastp annotation against Swiss-Prot with GO terms, and the org.Nvi.eg.db package for clusterProfiler, as
+used in this study. A newer annotation of the same transcriptome is available as the org.Nv.eg.db package
+([github.com/GeorgiiVdovin/org.Nv.eg.db](https://github.com/GeorgiiVdovin/org.Nv.eg.db)).
 
 `tx2gene_katia` - transcript to gene mapping for tximport, also used for org.Nvi.eg.db.
